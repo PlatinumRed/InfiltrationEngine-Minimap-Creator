@@ -1,0 +1,2436 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<External>null</External>
+	<External>nil</External>
+	<Item class="Script" referent="RBX762D1D4F0E1444A4B8710772ADAD628B">
+		<Properties>
+			<ProtectedString name="Source"><![CDATA[--[[
+	Minimap Creator v1.1
+	by: Red_Platinum
+]]
+
+local Selection = game:GetService("Selection")
+
+local State = require(script.State)
+local UI = require(script.UI)
+local Stage = require(script.Stage)
+local PartLists = require(script.PartLists)
+local MapData = require(script.MapData)
+local Builder = require(script.Builder)
+
+State.plugin = plugin
+
+local savedFilter = plugin:GetSetting("PartFilter")
+if savedFilter == "PartsOnly" or savedFilter == "PartsAndMeshes" or savedFilter == "All" then
+	State.partFilter = savedFilter
+else
+	State.partFilter = "PartsOnly"
+end
+
+local savedStyle = plugin:GetSetting("MapStyle")
+if savedStyle == "Default" or savedStyle == "Outline" then
+	State.mapStyle = savedStyle
+else
+	State.mapStyle = "Default"
+end
+
+State.thickenWalls = (plugin:GetSetting("ThickenThinWalls") == true)
+
+State.rebuildIfShowing = function()
+	if State.stage and not State.busy then
+		Builder.create()
+	end
+end
+
+local toolbar = plugin:CreateToolbar("Minimap Creator")
+local toolbarButton = toolbar:CreateButton("Minimap Creator", "Minimap Creator", "rbxassetid://88892478896646", "Minimap Creator")
+toolbarButton.ClickableWhenViewportHidden = false
+
+local currentWindow = nil
+local windowCount = 0
+local isOpening = false
+local isClosing = false
+local closeWindow
+
+local function buildWindow()
+	windowCount += 1
+
+	-- This renames the window everytime so that it doesn't remember the size and location of the previous
+	-- window. This allows us to have the plugin always open a new window with fixed size and location, and
+	-- also allows us to have it as a floating window (cause I hate docking).
+	local windowId = ("MissionMiniMapCreator_FloatingWindow_%d_%d"):format(os.time(), windowCount)
+
+	UI.buildUI(plugin, windowId)
+	Stage.buildPreview()
+	local window = UI.widget
+
+	UI.rotationBox = UI.numberRow("Rotation", 10, 15, function(step)
+		Stage.applyRotation(State.rotation + step)
+		UI.refreshNumbers()
+	end, Stage.applyRotation)
+
+	UI.minSizeBox = UI.numberRow("Min size", 11, 0.25, function(step)
+		State.minSize = math.max(0, State.minSize + step)
+		UI.refreshNumbers()
+		State.rebuildIfShowing()
+	end, function(typed)
+		State.minSize = math.max(0, typed)
+	end)
+
+	UI.minSpanBox = UI.numberRow("Min span %", 12, 10, function(step)
+		State.minSpanPercent = math.clamp(State.minSpanPercent + step, 0, 100)
+		UI.refreshNumbers()
+		State.rebuildIfShowing()
+	end, function(typed)
+		State.minSpanPercent = math.clamp(typed, 0, 100)
+	end)
+
+	UI.rotationBox.FocusLost:Connect(UI.refreshNumbers)
+	UI.minSizeBox.FocusLost:Connect(function()
+		UI.refreshNumbers()
+		State.rebuildIfShowing()
+	end)
+	UI.minSpanBox.FocusLost:Connect(function()
+		UI.refreshNumbers()
+		State.rebuildIfShowing()
+	end)
+
+	State.exceptions = PartLists.make({
+		title = "Exceptions", noun = "exception list", order = 13, defaultEnabled = false,
+		folderName = "MissionMiniMapExceptions", setting = "ExceptionsEnabled", rejectBalls = true,
+		allowedPaths = { State.geometryPath, State.glassPath },
+		addLabel = "Add selected parts to exceptions",
+		emptyText = "No exceptions yet. Select parts in Geometry or Glass and press the button above.",
+		rejectedNote = " %d ball(s) skipped.",
+		outsideNote = " %d part(s) skipped (not in Geometry or Glass).",
+	})
+	State.blacklist = PartLists.make({
+		title = "Blacklist", noun = "blacklist", order = 16, defaultEnabled = true,
+		folderName = "MissionMiniMapBlacklist", setting = "BlacklistEnabled", rejectBalls = false,
+		addLabel = "Add selected parts to blacklist",
+		emptyText = "Blacklist is empty. Select parts and press the button above.",
+		rejectedNote = " %d item(s) skipped.",
+	})
+
+	UI.refreshNumbers()
+
+	local function refreshSelectButton()
+		if State.selectedFloorKey then
+			UI.selectBtn.Text = "Select  (Floor " .. State.selectedFloorKey .. ")"
+		else
+			UI.selectBtn.Text = "Select"
+		end
+	end
+
+	local function describeFloor(floorKey)
+		local floor, err = MapData.resolveFloor(floorKey)
+		if not floor then
+			UI.infoLabel.Text = tostring(err)
+			return nil
+		end
+		if floor.above then
+			UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up to '%s' (Y %.1f)."):format(
+				floorKey, floor.part.Name, floor.lowY, floor.above.Name, floor.highY)
+		else
+			UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up %d studs (no part above it)."):format(
+				floorKey, floor.part.Name, floor.lowY, floor.highY - floor.lowY)
+		end
+		return floor
+	end
+
+	local function chooseFloor(floorKey)
+		State.selectedFloorKey = floorKey
+		UI.dropdown.Visible = false
+		refreshSelectButton()
+
+		local floor = describeFloor(floorKey)
+		if not floor then return end
+		Selection:Set(floor.above and { floor.part, floor.above } or { floor.part })
+
+		if State.stage and not State.busy then
+			Builder.create()
+		else
+			UI.setStatus("Floor " .. floorKey .. " selected. Press Create.")
+		end
+	end
+
+	local function populateDropdown(floors)
+		for _, child in ipairs(UI.dropdown:GetChildren()) do
+			if child:IsA("TextButton") then child:Destroy() end
+		end
+		for index, floorEntry in ipairs(floors) do
+			local floorButton = Instance.new("TextButton")
+			floorButton.Text = "Floor " .. floorEntry.key
+			floorButton.Font = Enum.Font.SourceSans
+			floorButton.TextSize = 14
+			floorButton.Size = UDim2.new(1, -6, 0, 24)
+			floorButton.LayoutOrder = index
+			floorButton.BorderSizePixel = 0
+			UI.Theme(floorButton, "button")
+			floorButton.Parent = UI.dropdown
+			floorButton.Activated:Connect(function() chooseFloor(floorEntry.key) end)
+		end
+		UI.dropdown.Size = UDim2.new(1, 0, 0, math.min(#floors * 26 + 8, 170))
+	end
+
+	UI.selectBtn.Activated:Connect(function()
+		if UI.dropdown.Visible then
+			UI.dropdown.Visible = false
+			return
+		end
+		local floors, err = MapData.scanFloors()
+		if not floors then
+			UI.setStatus(tostring(err), true)
+			return
+		end
+		if #floors == 0 then
+			UI.setStatus("No floors found in " .. table.concat(State.mapDataPath, "."), true)
+			return
+		end
+		populateDropdown(floors)
+		UI.dropdown.Visible = true
+		UI.setStatus("Choose a floor from the list.")
+	end)
+
+	local function refreshStyleButtons()
+		UI.defaultBtn.Text = (State.mapStyle == "Default") and "> Default <" or "Default"
+		UI.outlineBtn.Text = (State.mapStyle == "Outline") and "> Outline <" or "Outline"
+	end
+
+	local function setMapStyle(name)
+		State.mapStyle = name
+		plugin:SetSetting("MapStyle", name)
+		refreshStyleButtons()
+		Stage.applyStyle()
+	end
+
+	UI.defaultBtn.Activated:Connect(function() setMapStyle("Default") end)
+	UI.outlineBtn.Activated:Connect(function() setMapStyle("Outline") end)
+
+	local function refreshFilterButtons()
+		UI.partsBtn.Text = (State.partFilter == "PartsOnly") and "● Parts Only" or "Parts Only"
+		UI.meshesBtn.Text = (State.partFilter == "PartsAndMeshes") and "● Parts + Meshes" or "Parts + Meshes"
+		UI.allBtn.Text = (State.partFilter == "All") and "● All" or "All"
+	end
+
+	local function setPartFilter(name)
+		State.partFilter = name
+		plugin:SetSetting("PartFilter", name)
+		refreshFilterButtons()
+		State.rebuildIfShowing()
+	end
+
+	UI.partsBtn.Activated:Connect(function() setPartFilter("PartsOnly") end)
+	UI.meshesBtn.Activated:Connect(function() setPartFilter("PartsAndMeshes") end)
+	UI.allBtn.Activated:Connect(function() setPartFilter("All") end)
+
+	local function refreshThickenButton()
+		UI.thickenBtn.Text = "Thicken thin walls to the average: " .. (State.thickenWalls and "ON" or "OFF")
+	end
+
+	UI.thickenBtn.Activated:Connect(function()
+		State.thickenWalls = not State.thickenWalls
+		plugin:SetSetting("ThickenThinWalls", State.thickenWalls)
+		refreshThickenButton()
+		State.rebuildIfShowing()
+	end)
+
+	UI.createBtn.Activated:Connect(function() Builder.create() end)
+	UI.saveBtn.Activated:Connect(Builder.save)
+
+	window:GetPropertyChangedSignal("Enabled"):Connect(function()
+		if window.Enabled then
+			State.exceptions.refreshUI()
+			State.blacklist.refreshUI()
+		elseif currentWindow == window then
+			closeWindow()
+		end
+	end)
+
+	local resizeCount = 0
+	window:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		resizeCount += 1
+		local thisResize = resizeCount
+
+		task.delay(0.15, function()
+			if thisResize == resizeCount and State.stage and not State.busy then
+				Stage.updateCamera()
+			end
+		end)
+	end)
+
+	refreshStyleButtons()
+	refreshFilterButtons()
+	refreshThickenButton()
+	refreshSelectButton()
+	if State.selectedFloorKey then
+		describeFloor(State.selectedFloorKey)
+	end
+	return window
+end
+
+local function openWindow()
+	if currentWindow or isOpening or isClosing then return end
+
+	isOpening = true
+	currentWindow = buildWindow()
+	isOpening = false
+	currentWindow.Enabled = true
+	toolbarButton:SetActive(true)
+
+	-- We want the window active until manually closed for convenience so we end it here
+end
+
+function closeWindow()
+	local windowToClose = currentWindow
+	if not windowToClose then return end
+
+	currentWindow = nil
+	isClosing = true
+	toolbarButton:SetActive(false)
+
+	task.spawn(function()
+		while State.busy do
+			task.wait(0.1)
+		end
+		Stage.clear()
+		windowToClose:Destroy()
+		isClosing = false
+	end)
+end
+
+toolbarButton.Click:Connect(function()
+	if currentWindow then
+		closeWindow()
+	else
+		openWindow()
+	end
+end)
+
+plugin.Unloading:Connect(function()
+	Stage.clear()
+end)
+
+toolbarButton:SetActive(false)
+]]></ProtectedString>
+			<bool name="Disabled">false</bool>
+			<Content name="LinkedSource"><null></null></Content>
+			<token name="RunContext">0</token>
+			<string name="ScriptGuid">{9189B4AB-D226-4CEA-B2A3-C8BC5F77F803}</string>
+			<BinaryString name="AttributesSerialize"></BinaryString>
+			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+			<bool name="DefinesCapabilities">false</bool>
+			<string name="Name">Main</string>
+			<BinaryString name="SerializedOverrides"></BinaryString>
+			<int64 name="SourceAssetId">-1</int64>
+			<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+		</Properties>
+		<Item class="ModuleScript" referent="RBXABEDCFEAA4424D6DAAE629E904878508">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- UI module
+-- This module handles the UI. Yup, that's it.
+-- This was a lot more work than I expected going in though not gonna lie.
+
+local State = require(script.Parent.State)
+
+local UI = {}
+
+local function getTheme(obj, objType)
+	local theme = settings().Studio.Theme
+	local themeColor = Enum.StudioStyleGuideColor
+	if objType == "bg" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.MainBackground)
+	elseif objType == "panel" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.InputFieldBackground)
+		obj.BorderColor3 = theme:GetColor(themeColor.InputFieldBorder)
+	elseif objType == "button" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.Button)
+		obj.TextColor3 = theme:GetColor(themeColor.ButtonText)
+		obj.BorderColor3 = theme:GetColor(themeColor.ButtonBorder)
+	elseif objType == "label" then
+		obj.TextColor3 = theme:GetColor(themeColor.MainText)
+	elseif objType == "sub" then
+		obj.TextColor3 = theme:GetColor(themeColor.SubText)
+	elseif objType == "input" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.InputFieldBackground)
+		obj.TextColor3 = theme:GetColor(themeColor.MainText)
+		obj.BorderColor3 = theme:GetColor(themeColor.InputFieldBorder)
+	end
+end
+
+local Elements = {}
+
+local function reg(inst, objType)
+	table.insert(Elements, { inst, objType })
+	getTheme(inst, objType)
+	return inst
+end
+
+function UI.applyTheme()
+	for _, element in ipairs(Elements) do
+		getTheme(element[1], element[2])
+	end
+end
+
+UI.Theme = getTheme
+UI.reg = reg
+UI.updatingUI = false
+
+function UI.makeButton(text, layoutOrder, parent, size)
+	local button = reg(Instance.new("TextButton"), "button")
+	button.Text = text
+	button.Font = Enum.Font.SourceSansBold
+	button.TextSize = 15
+	button.Size = size or UDim2.new(1, 0, 0, 30)
+	button.BorderSizePixel = 1
+	button.LayoutOrder = layoutOrder
+	button.Parent = parent or UI.content
+	return button
+end
+
+function UI.numberRow(labelText, layoutOrder, step, onStep, onTyped)
+	local row = Instance.new("Frame")
+	row.BackgroundTransparency = 1
+	row.Size = UDim2.new(1, 0, 0, 28)
+	row.LayoutOrder = layoutOrder
+	row.Parent = UI.content
+
+	local rowLayout = Instance.new("UIListLayout")
+	rowLayout.FillDirection = Enum.FillDirection.Horizontal
+	rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	rowLayout.Padding = UDim.new(0, 6)
+	rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	rowLayout.Parent = row
+
+	local nameLabel = reg(Instance.new("TextLabel"), "label")
+	nameLabel.Text = labelText
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Font = Enum.Font.SourceSans
+	nameLabel.TextSize = 14
+	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+	nameLabel.Size = UDim2.new(0, 70, 1, 0)
+	nameLabel.LayoutOrder = 1
+	nameLabel.Parent = row
+
+	local minusBtn = UI.makeButton("-", 2, row, UDim2.new(0, 28, 1, 0))
+
+	local valueBox = reg(Instance.new("TextBox"), "input")
+	valueBox.Font = Enum.Font.SourceSans
+	valueBox.TextSize = 14
+	valueBox.ClearTextOnFocus = false
+	valueBox.BorderSizePixel = 1
+	valueBox.Size = UDim2.new(1, -(70 + 28 + 28 + 18), 1, 0)
+	valueBox.LayoutOrder = 3
+	valueBox.Parent = row
+
+	local plusBtn = UI.makeButton("+", 4, row, UDim2.new(0, 28, 1, 0))
+
+	minusBtn.Activated:Connect(function() onStep(-step) end)
+	plusBtn.Activated:Connect(function() onStep(step) end)
+	valueBox:GetPropertyChangedSignal("Text"):Connect(function()
+		if UI.updatingUI then return end
+		local typedNumber = tonumber(valueBox.Text)
+		if typedNumber then onTyped(typedNumber) end
+	end)
+
+	return valueBox
+end
+
+function UI.setStatus(message, isError)
+	UI.statusLabel.Text = message
+	if isError then
+		UI.statusLabel.TextColor3 = Color3.fromRGB(230, 90, 90)
+	else
+		getTheme(UI.statusLabel, "sub")
+	end
+end
+
+function UI.refreshNumbers()
+	UI.updatingUI = true
+	UI.rotationBox.Text = string.format("%.1f", State.rotation)
+	UI.minSizeBox.Text = string.format("%g", State.minSize)
+	UI.minSpanBox.Text = string.format("%g", State.minSpanPercent)
+	UI.updatingUI = false
+end
+
+function UI.buildUI(plugin, widgetId)
+	table.clear(Elements)
+
+	local windowInfo = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, true, 360, 600, 360, 360)
+	local widget = plugin:CreateDockWidgetPluginGuiAsync(widgetId, windowInfo)
+	widget.Title = "Minimap Creator"
+	UI.widget = widget
+
+	local content = reg(Instance.new("ScrollingFrame"), "bg")
+	content.Size = UDim2.fromScale(1, 1)
+	content.BorderSizePixel = 0
+	content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	content.CanvasSize = UDim2.new()
+	content.ScrollBarThickness = 6
+	content.Parent = widget
+	UI.content = content
+	do
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
+		pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 8), UDim.new(0, 14)
+		pad.Parent = content
+		local list = Instance.new("UIListLayout")
+		list.Padding = UDim.new(0, 6)
+		list.SortOrder = Enum.SortOrder.LayoutOrder
+		list.Parent = content
+	end
+
+	local title = reg(Instance.new("TextLabel"), "label")
+	title.Text = "Minimap Creator"
+	title.Size = UDim2.new(1, 0, 0, 30)
+	title.BackgroundTransparency = 1
+	title.Font = Enum.Font.SourceSansBold
+	title.TextSize = 18
+	title.Parent = content
+
+	local selectBtn = reg(Instance.new("TextButton"), "button")
+	selectBtn.Text = "Select"
+	selectBtn.Font = Enum.Font.SourceSansBold
+	selectBtn.TextSize = 15
+	selectBtn.Size = UDim2.new(1, 0, 0, 30)
+	selectBtn.BorderSizePixel = 1
+	selectBtn.LayoutOrder = 2
+	selectBtn.Parent = content
+	UI.selectBtn = selectBtn
+
+	local dropdown = reg(Instance.new("ScrollingFrame"), "panel")
+	dropdown.Size = UDim2.new(1, 0, 0, 100)
+	dropdown.BorderSizePixel = 1
+	dropdown.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	dropdown.CanvasSize = UDim2.new()
+	dropdown.ScrollBarThickness = 6
+	dropdown.Visible = false
+	dropdown.LayoutOrder = 3
+	dropdown.Parent = content
+	UI.dropdown = dropdown
+
+	local dropdownPad = Instance.new("UIPadding")
+	dropdownPad.PaddingTop, dropdownPad.PaddingBottom = UDim.new(0, 3), UDim.new(0, 3)
+	dropdownPad.PaddingLeft, dropdownPad.PaddingRight = UDim.new(0, 3), UDim.new(0, 3)
+	dropdownPad.Parent = dropdown
+
+	local dropdownList = Instance.new("UIListLayout")
+	dropdownList.Padding = UDim.new(0, 2)
+	dropdownList.SortOrder = Enum.SortOrder.LayoutOrder
+	dropdownList.Parent = dropdown
+
+	local infoLabel = reg(Instance.new("TextLabel"), "sub")
+	infoLabel.Text = "No floor selected."
+	infoLabel.BackgroundTransparency = 1
+	infoLabel.Font = Enum.Font.SourceSans
+	infoLabel.TextSize = 13
+	infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+	infoLabel.TextYAlignment = Enum.TextYAlignment.Top
+	infoLabel.TextWrapped = true
+	infoLabel.AutomaticSize = Enum.AutomaticSize.Y
+	infoLabel.Size = UDim2.new(1, 0, 0, 0)
+	infoLabel.LayoutOrder = 4
+	infoLabel.Parent = content
+	UI.infoLabel = infoLabel
+
+	local createBtn = reg(Instance.new("TextButton"), "button")
+	createBtn.Text = "Create"
+	createBtn.Font = Enum.Font.SourceSansBold
+	createBtn.TextSize = 15
+	createBtn.Size = UDim2.new(1, 0, 0, 30)
+	createBtn.BorderSizePixel = 1
+	createBtn.LayoutOrder = 5
+	createBtn.Parent = content
+	UI.createBtn = createBtn
+
+	local saveBtn = reg(Instance.new("TextButton"), "button")
+	saveBtn.Text = "Save"
+	saveBtn.Font = Enum.Font.SourceSansBold
+	saveBtn.TextSize = 15
+	saveBtn.Size = UDim2.new(1, 0, 0, 30)
+	saveBtn.BorderSizePixel = 1
+	saveBtn.LayoutOrder = 6
+	saveBtn.Parent = content
+	UI.saveBtn = saveBtn
+
+	local styleRow = Instance.new("Frame")
+	styleRow.BackgroundTransparency = 1
+	styleRow.Size = UDim2.new(1, 0, 0, 28)
+	styleRow.LayoutOrder = 7
+	styleRow.Parent = content
+
+	local styleLayout = Instance.new("UIListLayout")
+	styleLayout.FillDirection = Enum.FillDirection.Horizontal
+	styleLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	styleLayout.Padding = UDim.new(0, 6)
+	styleLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	styleLayout.Parent = styleRow
+
+	local defaultBtn = reg(Instance.new("TextButton"), "button")
+	defaultBtn.Text = "Default"
+	defaultBtn.Font = Enum.Font.SourceSansBold
+	defaultBtn.TextSize = 15
+	defaultBtn.Size = UDim2.new(0.5, -3, 1, 0)
+	defaultBtn.BorderSizePixel = 1
+	defaultBtn.LayoutOrder = 1
+	defaultBtn.Parent = styleRow
+	UI.defaultBtn = defaultBtn
+
+	local outlineBtn = reg(Instance.new("TextButton"), "button")
+	outlineBtn.Text = "Outline"
+	outlineBtn.Font = Enum.Font.SourceSansBold
+	outlineBtn.TextSize = 15
+	outlineBtn.Size = UDim2.new(0.5, -3, 1, 0)
+	outlineBtn.BorderSizePixel = 1
+	outlineBtn.LayoutOrder = 2
+	outlineBtn.Parent = styleRow
+	UI.outlineBtn = outlineBtn
+
+	local filterRow = Instance.new("Frame")
+	filterRow.BackgroundTransparency = 1
+	filterRow.Size = UDim2.new(1, 0, 0, 28)
+	filterRow.LayoutOrder = 8
+	filterRow.Parent = content
+
+	local filterLayout = Instance.new("UIListLayout")
+	filterLayout.FillDirection = Enum.FillDirection.Horizontal
+	filterLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	filterLayout.Padding = UDim.new(0, 6)
+	filterLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	filterLayout.Parent = filterRow
+
+	local partsBtn = reg(Instance.new("TextButton"), "button")
+	partsBtn.Text = "Parts Only"
+	partsBtn.Font = Enum.Font.SourceSansBold
+	partsBtn.TextScaled = true
+	partsBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
+	partsBtn.BorderSizePixel = 1
+	partsBtn.LayoutOrder = 1
+	partsBtn.Parent = filterRow
+	local partsLimit = Instance.new("UITextSizeConstraint")
+	partsLimit.MaxTextSize, partsLimit.MinTextSize = 14, 8
+	partsLimit.Parent = partsBtn
+	UI.partsBtn = partsBtn
+
+	local meshesBtn = reg(Instance.new("TextButton"), "button")
+	meshesBtn.Text = "Parts + Meshes"
+	meshesBtn.Font = Enum.Font.SourceSansBold
+	meshesBtn.TextScaled = true
+	meshesBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
+	meshesBtn.BorderSizePixel = 1
+	meshesBtn.LayoutOrder = 2
+	meshesBtn.Parent = filterRow
+	local meshesLimit = Instance.new("UITextSizeConstraint")
+	meshesLimit.MaxTextSize, meshesLimit.MinTextSize = 14, 8
+	meshesLimit.Parent = meshesBtn
+	UI.meshesBtn = meshesBtn
+
+	local allBtn = reg(Instance.new("TextButton"), "button")
+	allBtn.Text = "All"
+	allBtn.Font = Enum.Font.SourceSansBold
+	allBtn.TextScaled = true
+	allBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
+	allBtn.BorderSizePixel = 1
+	allBtn.LayoutOrder = 3
+	allBtn.Parent = filterRow
+	local allLimit = Instance.new("UITextSizeConstraint")
+	allLimit.MaxTextSize, allLimit.MinTextSize = 14, 8
+	allLimit.Parent = allBtn
+	UI.allBtn = allBtn
+
+	local thickenBtn = reg(Instance.new("TextButton"), "button")
+	thickenBtn.Text = "Thicken thin walls to the average"
+	thickenBtn.Font = Enum.Font.SourceSansBold
+	thickenBtn.TextSize = 15
+	thickenBtn.Size = UDim2.new(1, 0, 0, 30)
+	thickenBtn.BorderSizePixel = 1
+	thickenBtn.LayoutOrder = 9
+	thickenBtn.Parent = content
+	UI.thickenBtn = thickenBtn
+
+	local statusLabel = reg(Instance.new("TextLabel"), "sub")
+	statusLabel.Text = "Use Select to pick a floor."
+	statusLabel.BackgroundTransparency = 1
+	statusLabel.Font = Enum.Font.SourceSans
+	statusLabel.TextSize = 13
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+	statusLabel.TextWrapped = true
+	statusLabel.AutomaticSize = Enum.AutomaticSize.Y
+	statusLabel.Size = UDim2.new(1, 0, 0, 0)
+	statusLabel.LayoutOrder = 19
+	statusLabel.Parent = content
+	UI.statusLabel = statusLabel
+
+	if UI.themeConnection then UI.themeConnection:Disconnect() end
+	UI.themeConnection = settings().Studio.ThemeChanged:Connect(UI.applyTheme)
+end
+
+return UI
+]]></ProtectedString>
+				<string name="ScriptGuid">{97E46D10-9347-45ED-9643-C97A3947DB42}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">UI</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX2EBC6D2CE18549F9815D359848B8935E">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- Builder module
+-- Builds the minimap in some corner of the workspace so that it doesn't get in the way of regular studio stuff
+
+local Selection = game:GetService("Selection")
+local Lighting = game:GetService("Lighting")
+local AssetService = game:GetService("AssetService")
+local CaptureService = game:GetService("CaptureService")
+
+local State = require(script.Parent.State)
+local UI = require(script.Parent.UI)
+local Util = require(script.Parent.Util)
+local MapData = require(script.Parent.MapData)
+local Stage = require(script.Parent.Stage)
+
+local Builder = {}
+
+local TILE_SIZE = 2048
+local TILE_COUNT = 2
+local EXPORT_FOLDER = "MapExport"
+local EXPORT_PART = "ExportThisPartAsObj"
+
+local function createBackground(stage, minY)
+	local center = State.stageCenter
+	local tileCount, tileSize = TILE_COUNT, TILE_SIZE
+
+	for i = 0, tileCount - 1 do
+		for j = 0, tileCount - 1 do
+			local tile = Instance.new("Part")
+			tile.Name = "MinimapFloor"
+			tile.Anchored = true
+			tile.CanCollide = false
+			tile.CastShadow = false
+			tile.Material = Enum.Material.SmoothPlastic
+			tile.Reflectance = 0
+			tile.Size = Vector3.new(tileSize, 1, tileSize)
+			tile.Position = Vector3.new(
+				center.X + (i - (tileCount - 1) / 2) * tileSize,
+				minY - 0.5,
+				center.Z + (j - (tileCount - 1) / 2) * tileSize
+			)
+			tile:SetAttribute("MiniMapFloor", true)
+			tile.Color = Stage.styleColor(tile)
+			tile.Parent = stage
+		end
+	end
+end
+
+local function createCameraPart(stage)
+	local cp = Instance.new("Part")
+	cp.Name = "MinimapCamera"
+	cp.Size = Vector3.one
+	cp.Transparency = 1
+	cp.Anchored = true
+	cp.CanCollide, cp.CanQuery, cp.CanTouch, cp.CastShadow = false, false, false, false
+	cp.Parent = stage
+	return cp
+end
+
+function Builder.create()
+	if State.busy then return end
+
+	if not State.selectedFloorKey then
+		UI.setStatus("Select a floor first.", true)
+		return
+	end
+
+	local geometry = Util.getFolder(State.geometryPath)
+	if not geometry then
+		UI.setStatus("Workspace not found: " .. table.concat(State.geometryPath, "."), true)
+		return
+	end
+
+	local floor, err = MapData.resolveFloor(State.selectedFloorKey)
+	if not floor then
+		UI.setStatus(tostring(err), true)
+		return
+	end
+
+	local frame, areaSize = floor.frame, floor.size
+	local selLow = Vector3.new(-areaSize.X / 2, floor.lowY - frame.Position.Y, -areaSize.Y / 2)
+	local selHigh = Vector3.new(areaSize.X / 2, floor.highY - frame.Position.Y, areaSize.Y / 2)
+	local toStage = CFrame.new(State.stageCenter) * frame:Inverse()
+
+	Stage.clear()
+
+	local newStage = Instance.new("Folder")
+	newStage.Name = State.stageFolderName
+	newStage.Archivable = false
+
+	local excEntries = State.exceptions.enabled and State.exceptions.read() or {}
+	local blackEntries = State.blacklist.enabled and State.blacklist.read() or {}
+	local glassFolder = Util.getFolder(State.glassPath)
+	local propsFolder = Util.getFolder(State.propsPath)
+
+	-- Assume that the floor is a little above the MapData part. This is because official missions actually
+	-- do it this way, and the parts of the floor underneath it sometimes get selected because of this
+
+	-- This should work with any mission as long as the MapData part is not ABOVE the floor for some reason
+	local floorHeight = MapData.findFloorHeight(geometry, frame, selLow, selHigh, areaSize, blackEntries)
+	local floorY = (floorHeight or floor.lowY) - frame.Position.Y
+	local spanRange = math.max(selHigh.Y - floorY, 1e-3)
+
+	local doorBoxes = {}
+	local windowPlacements = {}
+	if propsFolder then
+		local doorList
+		doorList, windowPlacements = MapData.placements(propsFolder)
+
+		for _, pl in ipairs(doorList) do
+			local dSize = pl.part.Size
+			local dLow, dHigh = Util.boundsOfCFrame(pl.cf, dSize, frame)
+			local midY = (dLow.Y + dHigh.Y) / 2
+
+			local onThisFloor = midY >= selLow.Y and midY <= selHigh.Y
+				and dLow.X <= selHigh.X and dHigh.X >= selLow.X
+				and dLow.Z <= selHigh.Z and dHigh.Z >= selLow.Z
+
+			if onThisFloor then
+				local wLow, wHigh = Util.boundsOfCFrame(pl.cf, dSize)
+				table.insert(doorBoxes, { low = wLow, high = wHigh })
+			end
+		end
+	end
+
+	local function isAboveDoor(part)
+		if #doorBoxes == 0 then return false end
+
+		local pLow, pHigh = Util.partBounds(part)
+		for _, doorBox in ipairs(doorBoxes) do
+			local ox = math.min(pHigh.X, doorBox.high.X) - math.max(pLow.X, doorBox.low.X)
+			local oz = math.min(pHigh.Z, doorBox.high.Z) - math.max(pLow.Z, doorBox.low.Z)
+			if ox > 0.1 and oz > 0.1 and pLow.Y >= doorBox.high.Y - 1.5 then
+				return true
+			end
+		end
+		return false
+	end
+
+	local stairParts = MapData.findStairs(geometry, frame, selLow, selHigh, blackEntries)
+
+	local count, considered = 0, 0
+	local minY = math.huge
+	local copies = {}
+	local seen = {}
+	local glassRegions = {}
+
+	-- Original here is used for when glass parts are copied over to the minimap from PartCollection(s)
+	local function consider(part, isGlass, original)
+		local listPart = original or part
+		if seen[part] then return end
+		seen[part] = true
+
+		if not part:IsA("BasePart") or part:IsA("Terrain") or Util.isBall(part) then return end
+
+		local pLow, pHigh = Util.boundsInFrame(part, frame)
+		local inside = pLow.X <= selHigh.X and pHigh.X >= selLow.X
+			and pLow.Y <= selHigh.Y and pHigh.Y >= selLow.Y
+			and pLow.Z <= selHigh.Z and pHigh.Z >= selLow.Z
+		if not inside then return end
+		considered += 1
+
+		if #blackEntries > 0 and Util.matchesList(listPart, blackEntries) then return end
+
+		local isException = #excEntries > 0 and Util.matchesList(listPart, excEntries)
+
+		if floorHeight and not isException and pHigh.Y <= floorY + 0.25 then return end
+		if not isException and isAboveDoor(part) then return end
+
+		if not (isGlass or isException) then
+			if stairParts[part] then return end
+			if not Util.isVisible(part) then return end
+
+			local bsize = pHigh - pLow
+			local flatSlab = bsize.Y < bsize.X and bsize.Y < bsize.Z
+
+			local beside = not flatSlab and #glassRegions > 0 and Util.isBesideGlass(part, glassRegions)
+			if not beside then
+				local size = part.Size
+				local span = (math.min(pHigh.Y, selHigh.Y) - math.max(pLow.Y, floorY)) / spanRange * 100
+
+				if flatSlab
+					or not Util.passesFilter(part)
+					or not Util.isUpright(part)
+					or math.min(size.X, size.Y, size.Z) < State.minSize
+					or span < State.minSpanPercent then
+					return
+				end
+			end
+		end
+
+		local copy = part:Clone()
+		if not copy then return end
+
+		Stage.styleWall(copy)
+		copy.Color = Stage.styleColor(copy)
+		copy.CFrame = toStage * copy.CFrame
+		copy.Parent = newStage
+		table.insert(copies, copy)
+
+		local copyLow = Util.partBounds(copy)
+		minY = math.min(minY, copyLow.Y)
+		count += 1
+
+		if isGlass then
+			local region = Util.glassRegion(part)
+			if region then table.insert(glassRegions, region) end
+		end
+	end
+
+	if glassFolder then
+		for _, d in ipairs(glassFolder:GetDescendants()) do
+			consider(d, true)
+		end
+	end
+
+	for _, pl in ipairs(windowPlacements) do
+		if pl.moved then
+			local moved = pl.part:Clone()
+			if moved then
+				moved.CFrame = pl.cf
+				consider(moved, true, pl.part)
+			end
+		else
+			consider(pl.part, true)
+		end
+	end
+
+	for _, d in ipairs(geometry:GetDescendants()) do
+		if not Util.hasCondition(d, geometry) then
+			consider(d, false)
+		end
+	end
+
+	if count == 0 then
+		newStage:Destroy()
+		UI.setStatus("No parts passed the filters.", true)
+		return
+	end
+
+	local planeY = minY + 1
+	local flatParts = {}
+	for _, copy in ipairs(copies) do
+		if Stage.flattenPart(copy, planeY) then
+			table.insert(flatParts, copy)
+		end
+	end
+
+	if State.thickenWalls then
+		Util.thicken(flatParts)
+	end
+
+	for _, copy in ipairs(copies) do
+		table.insert(State.copiedParts, { part = copy, baseCFrame = copy.CFrame })
+		State.copiedPartSet[copy] = true
+	end
+
+	createBackground(newStage, minY)
+	local cp = createCameraPart(newStage)
+
+	local center = State.stageCenter
+	State.stageOrigin = Vector3.new(center.X, minY, center.Z)
+	State.stage, State.cameraPart = newStage, cp
+	newStage.Parent = workspace
+
+	State.mapArea = areaSize
+	Stage.rotateCopies(-State.rotation)
+	Stage.updateCamera()
+	Stage.rebuildPreview()
+
+	UI.setStatus(("Minimap created out of %d parts. %d parts filtered."):format(count, considered - count))
+end
+
+local PIXELS_PER_PAUSE = 1000000
+
+local FLAT_LIGHTING = {
+	GlobalShadows = false,
+	Brightness = 0,
+	Ambient = Color3.new(1, 1, 1),
+	OutdoorAmbient = Color3.new(1, 1, 1),
+	ColorShift_Top = Color3.new(0, 0, 0),
+	ColorShift_Bottom = Color3.new(0, 0, 0),
+	EnvironmentDiffuseScale = 0,
+	EnvironmentSpecularScale = 0,
+	ExposureCompensation = 1,
+	FogEnd = 1e6,
+	FogStart = 1e6 - 1,
+}
+
+local function applyFlatLighting()
+	local saved = { props = {}, effects = {} }
+
+	for name, flatValue in pairs(FLAT_LIGHTING) do
+		saved.props[name] = Lighting[name]
+		Lighting[name] = flatValue
+	end
+
+	for _, child in ipairs(Lighting:GetChildren()) do
+		if child:IsA("PostEffect") then
+			saved.effects[child] = { property = "Enabled", value = child.Enabled }
+			child.Enabled = false
+		elseif child:IsA("Atmosphere") then
+			saved.effects[child] = { property = "Density", value = child.Density }
+			child.Density = 0
+		end
+	end
+	return saved
+end
+
+local function restoreLighting(saved)
+	for name, value in pairs(saved.props) do
+		Lighting[name] = value
+	end
+	for effect, old in pairs(saved.effects) do
+		effect[old.property] = old.value
+	end
+end
+
+local function takeScreenshot()
+	local id = nil
+	CaptureService:CaptureScreenshot(function(contentId) id = contentId end)
+
+	local startTime = os.clock()
+	while not id and os.clock() - startTime < 8 do
+		task.wait(0.05)
+	end
+	return id
+end
+
+local function createExportPart(cropped, mapW, mapH, transparent)
+	local oldFolder = workspace:FindFirstChild(EXPORT_FOLDER)
+	if oldFolder then oldFolder:Destroy() end
+
+	local folder = Instance.new("Folder")
+	folder.Name = EXPORT_FOLDER
+
+	local part = Instance.new("Part")
+	part.Name = EXPORT_PART
+	part.Anchored = true
+	part.CanCollide = false
+	part.Material = Enum.Material.SmoothPlastic
+
+	local scale = 10 / math.max(mapW, mapH)
+	part.Size = Vector3.new(mapW * scale, mapH * scale, 0.2)
+
+	part.Color = transparent and Color3.fromRGB(60, 60, 60) or Color3.new(1, 1, 1)
+
+	part:SetAttribute("FloorId", State.selectedFloorKey)
+	part:SetAttribute("MapWidthStuds", mapW)
+	part:SetAttribute("MapHeightStuds", mapH)
+	part:SetAttribute("MinSize", State.minSize)
+	part:SetAttribute("MinSpanPercent", State.minSpanPercent)
+	part:SetAttribute("Rotation", State.rotation)
+	part:SetAttribute("MapStyle", State.mapStyle)
+	part:SetAttribute("ThickenThinWalls", State.thickenWalls)
+
+	local cam = workspace.CurrentCamera
+	local camPos = cam.CFrame.Position
+	part.CFrame = CFrame.lookAt(camPos + cam.CFrame.LookVector * 20, camPos)
+
+	local decal = Instance.new("Decal")
+	decal.Name = "MapImage"
+	decal.Face = Enum.NormalId.Front
+	decal.TextureContent = cropped
+	decal.Parent = part
+
+	part.Parent = folder
+	folder.Parent = workspace
+	return part
+end
+
+local function makeBlackTransparent(image)
+	local size = image.Size
+	local total = size.X * size.Y
+	local pixels = image:ReadPixelsBuffer(Vector2.zero, size)
+
+	local darkest, lightest = 255, 0
+	for i = 0, total - 1 do
+		local value = buffer.readu8(pixels, i * 4)
+		if value < darkest then darkest = value end
+		if value > lightest then lightest = value end
+		if i % PIXELS_PER_PAUSE == 0 and i > 0 then task.wait() end
+	end
+
+	local range = lightest - darkest
+	for i = 0, total - 1 do
+		local opacity
+		if range >= 32 then
+			opacity = math.floor((buffer.readu8(pixels, i * 4) - darkest) / range * 255 + 0.5)
+		else
+			opacity = (lightest >= 128) and 255 or 0
+		end
+
+		buffer.writeu32(pixels, i * 4, 0x00FFFFFF + opacity * 0x1000000)
+		if i % PIXELS_PER_PAUSE == 0 and i > 0 then task.wait() end
+	end
+
+	image:WritePixelsBuffer(Vector2.zero, size, pixels)
+end
+
+local function cropScreenshot(shotId, fracW, fracH, makeTransparent)
+	local shot = AssetService:CreateEditableImageAsync(Content.fromUri(shotId))
+	local w, h = shot.Size.X, shot.Size.Y
+
+	local cropW = math.clamp(math.floor(w * math.min(fracW, 1) + 0.5), 1, w)
+	local cropH = math.clamp(math.floor(h * math.min(fracH, 1) + 0.5), 1, h)
+	local offsetX = math.floor((w - cropW) / 2)
+	local offsetY = math.floor((h - cropH) / 2)
+
+	local cropped = AssetService:CreateEditableImage({ Size = Vector2.new(cropW, cropH) })
+	cropped:DrawImage(Vector2.new(-offsetX, -offsetY), shot, Enum.ImageCombineType.Overwrite)
+
+	if makeTransparent then makeBlackTransparent(cropped) end
+	return Content.fromObject(cropped)
+end
+
+function Builder.save()
+	if State.busy then return end
+
+	if not State.selectedFloorKey then
+		UI.setStatus("Select a floor first.", true)
+		return
+	end
+
+	Builder.create()
+	if not (State.stage and State.cameraPart) then return end
+
+	State.busy = true
+	UI.setStatus("Capturing...")
+
+	local cam = workspace.CurrentCamera
+	local savedCam = { cf = cam.CFrame, focus = cam.Focus, fov = cam.FieldOfView, mode = cam.FieldOfViewMode }
+	local oldSelection = Selection:Get()
+	local savedLighting = applyFlatLighting()
+
+	local viewport = cam.ViewportSize
+	local aspect = viewport.X / math.max(viewport.Y, 1)
+	local dist, fov, mapW, mapH = Stage.fitView(aspect)
+	local visibleH = 2 * dist * math.tan(math.rad(fov / 2))
+	local fracW = mapW / (visibleH * aspect)
+	local fracH = mapH / visibleH
+
+	local shotId = nil
+	local ok, err = pcall(function()
+		Selection:Set({})
+		cam.FieldOfViewMode = Enum.FieldOfViewMode.Vertical
+		cam.FieldOfView = fov
+		cam.CFrame = Stage.cameraCFrame(dist)
+		cam.Focus = CFrame.new(State.stageOrigin)
+		task.wait(0.8)
+
+		-- Studio trolls us and spins the camera for some reason when we take a screenshot
+		-- so we turn the minimap itself back by the same amount to line it up
+		local right = cam.CFrame.RightVector
+		local turn = math.deg(math.atan2(-right.Z, right.X))
+		if math.abs(turn) > 0.5 then
+			Stage.rotateCopies(-State.rotation + turn)
+			task.wait(0.5)
+		end
+
+		shotId = takeScreenshot()
+	end)
+
+	restoreLighting(savedLighting)
+	cam.CFrame = savedCam.cf
+	cam.Focus = savedCam.focus
+	cam.FieldOfView = savedCam.fov
+	cam.FieldOfViewMode = savedCam.mode
+	State.busy = false
+
+	if not shotId then
+		Selection:Set(oldSelection)
+		UI.setStatus("Screenshot failed: " .. (ok and "timed out" or tostring(err)), true)
+		return
+	end
+	Stage.clear()
+
+	local transparent = State.mapStyle == "Default"
+	local cropped = cropScreenshot(shotId, fracW, fracH, transparent)
+	local exportPart = createExportPart(cropped, mapW, mapH, transparent)
+
+	Selection:Set({ exportPart })
+	UI.setStatus("Minimap screenshot saved under " .. EXPORT_PART .. " part (currently selected). "
+		.. "Right click the part and export as obj to save the screenshot to your device next to the .obj file "
+		.. "(Try it again if it raises an error, it should work within like 3 attempts).")
+end
+
+return Builder
+]]></ProtectedString>
+				<string name="ScriptGuid">{F462350D-76F4-4973-B948-C6D970041783}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">Builder</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX2C33F8931F314572A3796944EC8BE00A">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- MapData module
+-- Wait let me guess! This has to do with the MapData folder from DebugMission!
+-- Lol no, this module has multiple filters that are used to sort parts for the
+-- minimap. Also uses helper functions from the util module for the filters.
+
+local State = require(script.Parent.State)
+local Util = require(script.Parent.Util)
+
+local MapData = {}
+
+local FLOOR_PIECE_MIN_SIDE = 40
+local FLOOR_SEARCH_BELOW = 1
+local FLOOR_SEARCH_ABOVE = 10
+local FLOOR_LEVEL_TOLERANCE = 0.25
+local FLOOR_MIN_COVERAGE = 0.1
+
+local STAIR_NAMES = { "stair", "step" }
+local STAIR_MIN_STEPS = 3
+local STAIR_RISE_MIN, STAIR_RISE_MAX = 0.2, 2.5
+local STAIR_RUN_MIN, STAIR_RUN_MAX = 0.2, 6
+local STAIR_TOLERANCE = 0.15
+
+function MapData.scanFloors()
+	local mapDataFolder = Util.getFolder(State.mapDataPath)
+	if not mapDataFolder then
+		return nil, "Workspace not found: " .. table.concat(State.mapDataPath, ".")
+	end
+
+	local floors = {}
+	local seen = {}
+	for _, obj in ipairs(mapDataFolder:GetDescendants()) do
+		if obj:IsA("BasePart") then
+			local floorId = obj:GetAttribute("Id")
+			if floorId ~= nil then
+				local floorKey = tostring(floorId)
+				if not seen[floorKey] then
+					seen[floorKey] = true
+					table.insert(floors, { key = floorKey, part = obj })
+				end
+			end
+		end
+	end
+
+	table.sort(floors, function(firstFloor, secondFloor)
+		local firstNumber, secondNumber = tonumber(firstFloor.key), tonumber(secondFloor.key)
+		if (firstNumber ~= nil) ~= (secondNumber ~= nil) then return firstNumber ~= nil end
+		if firstNumber and secondNumber and firstNumber ~= secondNumber then return firstNumber < secondNumber end
+		return firstFloor.key < secondFloor.key
+	end)
+
+	return floors, mapDataFolder
+end
+
+function MapData.findPartAbove(mapDataFolder, floorPart)
+	local floorLow, floorHigh = Util.partBounds(floorPart)
+	local closestPart, closestY = nil, nil
+
+	for _, obj in ipairs(mapDataFolder:GetDescendants()) do
+		if obj:IsA("BasePart") and obj ~= floorPart then
+			local low, high = Util.partBounds(obj)
+			local ox = math.min(floorHigh.X, high.X) - math.max(floorLow.X, low.X)
+			local oz = math.min(floorHigh.Z, high.Z) - math.max(floorLow.Z, low.Z)
+			local height = obj.Position.Y
+			if ox > 0 and oz > 0 and height > floorHigh.Y and (closestY == nil or height < closestY) then
+				closestPart, closestY = obj, height
+			end
+		end
+	end
+	return closestPart
+end
+
+function MapData.computeRegion(floorPart, partAbove)
+	local floorLow = Util.partBounds(floorPart)
+	local lowY = floorLow.Y
+	local highY
+	if partAbove then
+		local aboveLow = Util.partBounds(partAbove)
+		highY = aboveLow.Y
+	else
+		highY = lowY + 15
+	end
+	highY = math.max(highY, lowY + 1)
+
+	local look = floorPart.CFrame.LookVector
+	local turnAngle = math.atan2(-look.X, -look.Z)
+	local position = floorPart.Position
+	local frame = CFrame.new(position.X, (lowY + highY) / 2, position.Z) * CFrame.Angles(0, turnAngle, 0)
+
+	local areaLow, areaHigh = Util.boundsInFrame(floorPart, frame)
+	local areaSize = Vector2.new(areaHigh.X - areaLow.X, areaHigh.Z - areaLow.Z)
+	return frame, areaSize, lowY, highY
+end
+
+function MapData.resolveFloor(floorKey)
+	local floors, mapDataFolder = MapData.scanFloors()
+	if not floors then return nil, mapDataFolder end
+
+	for _, floor in ipairs(floors) do
+		if floor.key == floorKey then
+			local partAbove = MapData.findPartAbove(mapDataFolder, floor.part)
+			local frame, areaSize, lowY, highY = MapData.computeRegion(floor.part, partAbove)
+			return {
+				part = floor.part,
+				above = partAbove,
+				frame = frame,
+				size = areaSize,
+				lowY = lowY,
+				highY = highY,
+			}
+		end
+	end
+	return nil, "Floor " .. floorKey .. " not found, try using Select again."
+end
+
+-- Finds the real floor height from the big flat parts near the MapData part
+function MapData.findFloorHeight(geometry, frame, selLow, selHigh, areaSize, blackEntries)
+	local minSide = math.min(FLOOR_PIECE_MIN_SIDE, math.min(areaSize.X, areaSize.Y) * 0.5)
+	local lowTop = selLow.Y - FLOOR_SEARCH_BELOW
+	local highTop = math.min(selLow.Y + FLOOR_SEARCH_ABOVE, selHigh.Y)
+	local totalArea = math.max(areaSize.X * areaSize.Y, 1e-3)
+
+	local floorPieces = {}
+	for _, obj in ipairs(geometry:GetDescendants()) do
+		if obj:IsA("BasePart") and not obj:IsA("Terrain") and not Util.isBall(obj)
+			and Util.isVisible(obj) and Util.isUpright(obj)
+			and not Util.hasCondition(obj, geometry)
+			and not (#blackEntries > 0 and Util.matchesList(obj, blackEntries)) then
+
+			local low, high = Util.boundsInFrame(obj, frame)
+			local sx, sy, sz = high.X - low.X, high.Y - low.Y, high.Z - low.Z
+
+			if sy < sx and sy < sz and sx >= minSide and sz >= minSide
+				and high.Y >= lowTop and high.Y <= highTop then
+
+				local ox = math.min(high.X, selHigh.X) - math.max(low.X, selLow.X)
+				local oz = math.min(high.Z, selHigh.Z) - math.max(low.Z, selLow.Z)
+				if ox > 0 and oz > 0 then
+					table.insert(floorPieces, { top = high.Y, area = ox * oz })
+				end
+			end
+		end
+	end
+	if #floorPieces == 0 then return nil end
+
+	table.sort(floorPieces, function(firstPiece, secondPiece) return firstPiece.top < secondPiece.top end)
+
+	-- This groups pieces with the same top height so we can use it to find the real floor
+	local floorLevels = {}
+	for _, piece in ipairs(floorPieces) do
+		local level = floorLevels[#floorLevels]
+		if level and piece.top - level.lastTop <= FLOOR_LEVEL_TOLERANCE then
+			level.lastTop = piece.top
+			level.area += piece.area
+			level.weightedTop += piece.top * piece.area
+			level.pieceCount += 1
+		else
+			table.insert(floorLevels, {
+				lastTop = piece.top,
+				area = piece.area,
+				weightedTop = piece.top * piece.area,
+				pieceCount = 1,
+			})
+		end
+	end
+
+	-- Finds the lowest group of parts that covers enough of the map (which should be the real floor)
+	for _, level in ipairs(floorLevels) do
+		if level.area / totalArea >= FLOOR_MIN_COVERAGE then
+			return frame.Position.Y + level.weightedTop / level.area, level.pieceCount
+		end
+	end
+	return nil
+end
+
+local function getCellKey(cellX, cellZ, cellTop)
+	return cellX .. "," .. cellZ .. "," .. cellTop
+end
+
+local function findStepAt(grid, x, z, top)
+	local tolerance = STAIR_TOLERANCE
+	local cellSize = tolerance * 2
+	local cellX, cellZ, cellTop = math.floor(x / cellSize), math.floor(z / cellSize), math.floor(top / cellSize)
+
+	for offsetX = -1, 1 do
+		for offsetZ = -1, 1 do
+			for offsetTop = -1, 1 do
+				local cell = grid[getCellKey(cellX + offsetX, cellZ + offsetZ, cellTop + offsetTop)]
+				if cell then
+					for _, step in ipairs(cell) do
+						if math.abs(step.x - x) <= tolerance and math.abs(step.z - z) <= tolerance and math.abs(step.top - top) <= tolerance then
+							return step
+						end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function detectStairs(candidates, stairParts)
+	local cellSize = STAIR_TOLERANCE * 2
+
+	local groups = {}
+	for _, candidate in ipairs(candidates) do
+		local sizeKey = math.floor(candidate.width * 10 + 0.5) .. "_" .. math.floor(candidate.depth * 10 + 0.5)
+		groups[sizeKey] = groups[sizeKey] or {}
+		table.insert(groups[sizeKey], candidate)
+	end
+
+	for _, group in pairs(groups) do
+		if #group >= STAIR_MIN_STEPS then
+			table.sort(group, function(a, b) return a.top < b.top end)
+
+			local grid = {}
+			for _, step in ipairs(group) do
+				local cellKey = getCellKey(math.floor(step.x / cellSize), math.floor(step.z / cellSize), math.floor(step.top / cellSize))
+				grid[cellKey] = grid[cellKey] or {}
+				table.insert(grid[cellKey], step)
+			end
+
+			local start = 1
+			for _, lower in ipairs(group) do
+				while start <= #group and group[start].top < lower.top + STAIR_RISE_MIN do
+					start += 1
+				end
+
+				local j = start
+				while j <= #group and group[j].top <= lower.top + STAIR_RISE_MAX do
+					local upper = group[j]
+					local dx, dz = upper.x - lower.x, upper.z - lower.z
+					local run = math.sqrt(dx * dx + dz * dz)
+
+					if run >= STAIR_RUN_MIN and run <= STAIR_RUN_MAX then
+						local rise = upper.top - lower.top
+						local chain = { lower, upper }
+						local last = upper
+						while #chain < 500 do
+							local nextStep = findStepAt(grid, last.x + dx, last.z + dz, last.top + rise)
+							if not nextStep then break end
+							table.insert(chain, nextStep)
+							last = nextStep
+						end
+
+						if #chain >= STAIR_MIN_STEPS then
+							for _, step in ipairs(chain) do
+								stairParts[step.part] = true
+							end
+						end
+					end
+					j += 1
+				end
+			end
+		end
+	end
+end
+
+function MapData.findStairs(geometry, frame, selLow, selHigh, blackEntries)
+	local stairParts = {}
+	local stairNames = {}
+	for _, name in ipairs(STAIR_NAMES) do
+		table.insert(stairNames, string.lower(name))
+	end
+
+	local candidates = {}
+	for _, obj in ipairs(geometry:GetDescendants()) do
+		if obj:IsA("BasePart") and not obj:IsA("Terrain") and not Util.isBall(obj) and not Util.hasCondition(obj, geometry) then
+			local low, high = Util.boundsInFrame(obj, frame)
+			local inside = low.X <= selHigh.X and high.X >= selLow.X
+				and low.Y <= selHigh.Y and high.Y >= selLow.Y
+				and low.Z <= selHigh.Z and high.Z >= selLow.Z
+
+			if inside and Util.passesFilter(obj) and Util.isVisible(obj)
+				and not (#blackEntries > 0 and Util.matchesList(obj, blackEntries)) then
+
+				local named = false
+				local inst = obj
+				while #stairNames > 0 and inst and inst ~= geometry and not named do
+					local lname = string.lower(inst.Name)
+					for _, stairName in ipairs(stairNames) do
+						if string.find(lname, stairName, 1, true) then
+							named = true
+							break
+						end
+					end
+					inst = inst.Parent
+				end
+
+				if named then
+					stairParts[obj] = true
+				else
+					local rel = frame:ToObjectSpace(obj.CFrame)
+					table.insert(candidates, {
+						part = obj,
+						x = rel.Position.X,
+						z = rel.Position.Z,
+						top = high.Y,
+						width = high.X - low.X,
+						depth = high.Z - low.Z,
+					})
+				end
+			end
+		end
+	end
+
+	detectStairs(candidates, stairParts)
+	return stairParts
+end
+
+local function getBox(inst)
+	if inst:IsA("BasePart") then return inst.CFrame, inst.Size end
+
+	if inst:IsA("Model") then
+		return inst:GetBoundingBox()
+	end
+	return nil
+end
+
+-- PartCollection has a ShuffleTarget attribute, ShuffleTargets have a matching ShuffleTag.
+-- A collection can end up at any target with the same tag.
+-- So we use this function to find out which PartCollections are linked to which ShuffleTags.
+local function findCollections(propsFolder)
+	local collections = {}
+	local targetsByTag = {}
+
+	for _, inst in ipairs(propsFolder:GetDescendants()) do
+		if inst:IsA("BasePart") or inst:IsA("Model") then
+			local key = inst:GetAttribute("ShuffleTarget")
+			local targetTag = inst:GetAttribute("ShuffleTag")
+
+			if key ~= nil or targetTag ~= nil then
+				local cf, size = getBox(inst)
+				if cf then
+					if key ~= nil then
+						table.insert(collections, { cf = cf, size = size, key = tostring(key) })
+					end
+					if targetTag ~= nil then
+						local tag = tostring(targetTag)
+						targetsByTag[tag] = targetsByTag[tag] or {}
+						table.insert(targetsByTag[tag], { cf = cf })
+					end
+				end
+			end
+		end
+	end
+
+	return collections, targetsByTag
+end
+
+local function isInsideCollection(collection, part)
+	local rel = collection.cf:PointToObjectSpace(part.Position)
+	local tolerance = 0.5
+	return math.abs(rel.X) <= collection.size.X / 2 + tolerance
+		and math.abs(rel.Y) <= collection.size.Y / 2 + tolerance
+		and math.abs(rel.Z) <= collection.size.Z / 2 + tolerance
+end
+
+-- You know how sometimes we have doors and windows inside of PartCollections?
+-- This handles that. Parts inside a collection get one position per target.
+-- And then the door / window gets duplicated to a would-be location inside the
+-- ShuffleTarget so we can leave spaces or draw walls indicating their presence
+-- in the minimap.
+function MapData.placements(propsFolder)
+	local doors, windows = {}, {}
+	local doorKey, windowKey = "door", "window"
+	local collections, targetsByTag = findCollections(propsFolder)
+
+	for _, part in ipairs(propsFolder:GetDescendants()) do
+		if part:IsA("BasePart") then
+			local lowerName = string.lower(part.Name)
+			local list = nil
+			if lowerName == windowKey then
+				list = windows
+			elseif string.find(lowerName, doorKey, 1, true) then
+				list = doors
+			end
+
+			if list then
+				local placed = false
+				for _, collection in ipairs(collections) do
+					if isInsideCollection(collection, part) then
+						for _, target in ipairs(targetsByTag[collection.key] or {}) do
+							local newCf = target.cf * collection.cf:Inverse() * part.CFrame
+							table.insert(list, { part = part, cf = newCf, moved = true })
+							placed = true
+						end
+					end
+				end
+
+				if not placed then
+					table.insert(list, { part = part, cf = part.CFrame, moved = false })
+				end
+			end
+		end
+	end
+
+	return doors, windows
+end
+
+return MapData
+]]></ProtectedString>
+				<string name="ScriptGuid">{5B356950-DD27-4576-8548-92624172773A}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">MapData</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBXBD20B8B94FD04A00942138D1E7D7A81D">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- PartLists module
+-- Finally a module that needs no explanation, I mean it's right there in the name
+-- I'll say it anyway, this module handles the exceptions list and the blacklist
+-- for the plugin.
+
+local Selection = game:GetService("Selection")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local State = require(script.Parent.State)
+local UI = require(script.Parent.UI)
+local Util = require(script.Parent.Util)
+
+local MAX_ADD_AT_ONCE = 300
+
+local PartLists = {}
+
+function PartLists.make(cfg)
+	local list = {}
+
+	local saved = State.plugin:GetSetting(cfg.setting)
+	if saved == nil then
+		list.enabled = cfg.defaultEnabled
+	else
+		list.enabled = (saved == true)
+	end
+
+	local function getListFolder(createIfMissing)
+		local folder = ReplicatedStorage:FindFirstChild(cfg.folderName)
+		if not folder and createIfMissing then
+			folder = Instance.new("Folder")
+			folder.Name = cfg.folderName
+			folder.Parent = ReplicatedStorage
+		end
+		return folder
+	end
+
+	function list.read()
+		local entries = {}
+		local folder = getListFolder(false)
+		if not folder then return entries end
+
+		for _, obj in ipairs(folder:GetChildren()) do
+			if obj:IsA("ObjectValue") then
+				local color = obj:GetAttribute("Color")
+				local material = obj:GetAttribute("Material")
+				local size = obj:GetAttribute("Size")
+
+				if typeof(color) == "Color3" and type(material) == "string" and typeof(size) == "Vector3" then
+					table.insert(entries, {
+						obj = obj,
+						part = obj.Value,
+						color = color,
+						material = material,
+						sortedSize = Util.sortedSize(size),
+						matchAll = obj:GetAttribute("ApplyToMatchingParts") == true,
+					})
+				end
+			end
+		end
+		return entries
+	end
+
+	local toggleBtn = UI.makeButton("", cfg.order)
+	local addBtn = UI.makeButton(cfg.addLabel, cfg.order + 1)
+
+	local listFrame = UI.reg(Instance.new("ScrollingFrame"), "panel")
+	listFrame.LayoutOrder = cfg.order + 2
+	listFrame.Size = UDim2.new(1, 0, 0, 90)
+	listFrame.BorderSizePixel = 1
+	listFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	listFrame.CanvasSize = UDim2.new()
+	listFrame.ScrollBarThickness = 6
+	listFrame.Parent = UI.content
+
+	local listPad = Instance.new("UIPadding")
+	listPad.PaddingTop, listPad.PaddingBottom = UDim.new(0, 3), UDim.new(0, 3)
+	listPad.PaddingLeft, listPad.PaddingRight = UDim.new(0, 3), UDim.new(0, 3)
+	listPad.Parent = listFrame
+
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.Padding = UDim.new(0, 2)
+	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	listLayout.Parent = listFrame
+
+	function list.refreshUI()
+		toggleBtn.Text = cfg.title .. (list.enabled and ": ON" or ": OFF")
+
+		for _, child in ipairs(listFrame:GetChildren()) do
+			if child:IsA("GuiObject") then child:Destroy() end
+		end
+
+		local entries = list.read()
+		if #entries == 0 then
+			local emptyLabel = Instance.new("TextLabel")
+			emptyLabel.BackgroundTransparency = 1
+			emptyLabel.Size = UDim2.new(1, -6, 0, 40)
+			emptyLabel.Text = cfg.emptyText
+			emptyLabel.TextWrapped = true
+			emptyLabel.Font = Enum.Font.SourceSans
+			emptyLabel.TextSize = 13
+			emptyLabel.TextXAlignment = Enum.TextXAlignment.Left
+			emptyLabel.TextYAlignment = Enum.TextYAlignment.Top
+			UI.Theme(emptyLabel, "sub")
+			emptyLabel.Parent = listFrame
+			return
+		end
+
+		for i, entry in ipairs(entries) do
+			local row = Instance.new("Frame")
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, -6, 0, 24)
+			row.LayoutOrder = i
+			row.Parent = listFrame
+
+			local rowLayout = Instance.new("UIListLayout")
+			rowLayout.FillDirection = Enum.FillDirection.Horizontal
+			rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+			rowLayout.Padding = UDim.new(0, 4)
+			rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+			rowLayout.Parent = row
+
+			local nameLabel = Instance.new("TextLabel")
+			nameLabel.BackgroundTransparency = 1
+			nameLabel.Size = UDim2.new(1, -(96 + 24 + 8), 1, 0)
+			nameLabel.LayoutOrder = 1
+			nameLabel.Text = entry.obj.Name .. (entry.part and "" or " (missing)")
+			nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+			nameLabel.Font = Enum.Font.SourceSans
+			nameLabel.TextSize = 14
+			nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+			UI.Theme(nameLabel, "label")
+			nameLabel.Parent = row
+
+			local matchBtn = Instance.new("TextButton")
+			matchBtn.Size = UDim2.new(0, 96, 1, 0)
+			matchBtn.LayoutOrder = 2
+			matchBtn.Text = entry.matchAll and "Match all: ON" or "Match all: OFF"
+			matchBtn.Font = Enum.Font.SourceSans
+			matchBtn.TextSize = 13
+			matchBtn.BorderSizePixel = 1
+			UI.Theme(matchBtn, "button")
+			matchBtn.Parent = row
+
+			local delBtn = Instance.new("TextButton")
+			delBtn.Size = UDim2.new(0, 24, 1, 0)
+			delBtn.LayoutOrder = 3
+			delBtn.Text = "X"
+			delBtn.Font = Enum.Font.SourceSansBold
+			delBtn.TextSize = 14
+			delBtn.BorderSizePixel = 1
+			UI.Theme(delBtn, "button")
+			delBtn.Parent = row
+
+			matchBtn.Activated:Connect(function()
+				entry.obj:SetAttribute("ApplyToMatchingParts", not entry.matchAll)
+				list.refreshUI()
+				if list.enabled then State.rebuildIfShowing() end
+			end)
+
+			delBtn.Activated:Connect(function()
+				entry.obj:Destroy()
+				list.refreshUI()
+				if list.enabled then State.rebuildIfShowing() end
+			end)
+		end
+	end
+
+	local function addSelectedParts()
+		local candidates = {}
+		for _, inst in ipairs(Selection:Get()) do
+			if inst:IsA("BasePart") then
+				table.insert(candidates, inst)
+			elseif inst:IsA("Model") or inst:IsA("Folder") then
+				for _, d in ipairs(inst:GetDescendants()) do
+					if d:IsA("BasePart") then table.insert(candidates, d) end
+				end
+			end
+		end
+
+		if #candidates == 0 then
+			UI.setStatus("Select some parts first.", true)
+			return
+		end
+
+		local roots = nil
+		if cfg.allowedPaths then
+			roots = {}
+			for _, path in ipairs(cfg.allowedPaths) do
+				local folder = Util.getFolder(path)
+				if folder then table.insert(roots, folder) end
+			end
+		end
+
+		local function allowed(part)
+			if not roots then return true end
+			for _, folder in ipairs(roots) do
+				if part:IsDescendantOf(folder) then return true end
+			end
+			return false
+		end
+
+		local store = getListFolder(true)
+		local existing = {}
+		for _, obj in ipairs(store:GetChildren()) do
+			if obj:IsA("ObjectValue") and obj.Value then
+				existing[obj.Value] = true
+			end
+		end
+
+		local added, rejected, outside, dupes = 0, 0, 0, 0
+		local capped = false
+
+		for _, part in ipairs(candidates) do
+			if part:IsA("Terrain") or (cfg.rejectBalls and Util.isBall(part)) then
+				rejected += 1
+			elseif not allowed(part) then
+				outside += 1
+			elseif existing[part] then
+				dupes += 1
+			elseif added >= MAX_ADD_AT_ONCE then
+				capped = true
+				break
+			else
+				local obj = Instance.new("ObjectValue")
+				obj.Name = part.Name
+				obj.Value = part
+				obj:SetAttribute("Color", part.Color)
+				obj:SetAttribute("Material", part.Material.Name)
+				obj:SetAttribute("Size", part.Size)
+				obj:SetAttribute("ApplyToMatchingParts", false)
+				obj.Parent = store
+				existing[part] = true
+				added += 1
+			end
+		end
+
+		list.refreshUI()
+
+		local msg = ("Added %d part(s) to the %s."):format(added, cfg.noun)
+		if dupes > 0 then msg ..= (" %d already in the list."):format(dupes) end
+		if rejected > 0 then msg ..= cfg.rejectedNote:format(rejected) end
+		if outside > 0 and cfg.outsideNote then msg ..= cfg.outsideNote:format(outside) end
+		if capped then msg ..= (" Stopped at %d parts, use Match all for duplicates."):format(MAX_ADD_AT_ONCE) end
+		UI.setStatus(msg, added == 0)
+
+		if added > 0 and list.enabled then State.rebuildIfShowing() end
+	end
+
+	toggleBtn.Activated:Connect(function()
+		list.enabled = not list.enabled
+		State.plugin:SetSetting(cfg.setting, list.enabled)
+		list.refreshUI()
+		State.rebuildIfShowing()
+	end)
+	addBtn.Activated:Connect(addSelectedParts)
+
+	list.refreshUI()
+	return list
+end
+
+return PartLists
+]]></ProtectedString>
+				<string name="ScriptGuid">{F9816569-0C51-460D-BCA7-FC48F661C982}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">PartLists</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX15BF7F89287B4CB88895F5EBE1855BD4">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- Stage module
+-- This is what I call the copy of the minimap that we see in the preview
+-- It is also what we take a screenshot of for the final minimap image
+
+local State = require(script.Parent.State)
+local Util = require(script.Parent.Util)
+local UI = require(script.Parent.UI)
+
+local Stage = {}
+
+local FLAT_THICKNESS = 0.5
+local FOV = 5
+local MAX_CAMERA_DISTANCE = 8000
+local PREVIEW_SIZE = 270
+local MAX_PREVIEW_SIZE = 900
+local MIN_LINE_PX = 1.5
+
+function Stage.clear()
+	if State.stage then State.stage:Destroy() end
+
+	local leftover = workspace:FindFirstChild(State.stageFolderName)
+	if leftover then leftover:Destroy() end
+
+	State.stage, State.cameraPart = nil, nil
+	State.copiedParts, State.copiedPartSet = {}, {}
+	State.previewCopies, State.previewSizes = {}, {}
+	Stage.world:ClearAllChildren()
+	Stage.setPreviewVisible(false)
+end
+
+function Stage.styleColor(part)
+	local isBg = part:GetAttribute("MiniMapFloor")
+	if State.mapStyle == "Default" then
+		return isBg and Color3.new(1, 1, 1) or Color3.new(0, 0, 0)
+	end
+	return isBg and Color3.new(0, 0, 0) or Color3.new(1, 1, 1)
+end
+
+function Stage.styleWall(copy)
+	for _, child in ipairs(copy:GetChildren()) do
+		if not child:IsA("SpecialMesh") then child:Destroy() end
+	end
+
+	copy.Anchored = true
+	copy.CanCollide = false
+	copy.CastShadow = false
+	copy.Transparency = 0
+	copy.Reflectance = 0
+	copy.Material = Enum.Material.SmoothPlastic
+	if copy:IsA("UnionOperation") then copy.UsePartColor = true end
+	if copy:IsA("MeshPart") then copy.TextureID = "" end
+end
+
+-- Flatten the part alongside whichever side is pointing up or down (and ignore tilted parts)
+function Stage.flattenPart(part, planeY)
+	if not Util.isUpright(part) then return false end
+
+	local side = Util.verticalSide(part)
+	local size = part.Size
+	part.Size = Vector3.new(
+		side == 1 and FLAT_THICKNESS or size.X,
+		side == 2 and FLAT_THICKNESS or size.Y,
+		side == 3 and FLAT_THICKNESS or size.Z
+	)
+
+	local pos = part.Position
+	part.CFrame = part.CFrame.Rotation + Vector3.new(pos.X, planeY, pos.Z)
+	return true
+end
+
+function Stage.rotateCopies(degrees)
+	local center = State.stageCenter
+	local rotation = CFrame.new(center.X, 0, center.Z) * CFrame.Angles(0, math.rad(degrees), 0) * CFrame.new(-center.X, 0, -center.Z)
+
+	for _, entry in ipairs(State.copiedParts) do
+		local rotated = rotation * entry.baseCFrame
+		entry.part.CFrame = rotated
+
+		local twin = State.previewCopies[entry.part]
+		if twin then twin.CFrame = rotated + State.previewOffset end
+	end
+end
+
+function Stage.applyRotation(degrees)
+	State.rotation = degrees % 360
+	Stage.rotateCopies(-State.rotation)
+	Stage.updateCamera()
+end
+
+function Stage.applyStyle()
+	if not State.stage then return end
+
+	for _, child in ipairs(State.stage:GetChildren()) do
+		if child:IsA("BasePart") and child ~= State.cameraPart then
+			child.Color = Stage.styleColor(child)
+		end
+	end
+	Stage.rebuildPreview()
+end
+
+function Stage.buildPreview()
+	local container = UI.reg(Instance.new("Frame"), "bg")
+	container.LayoutOrder = 20
+	container.Size = UDim2.new(1, 0, 0, PREVIEW_SIZE + 6)
+	container.BorderSizePixel = 0
+	container.Parent = UI.content
+	Stage.container = container
+
+	local hint = UI.reg(Instance.new("TextLabel"), "sub")
+	hint.BackgroundTransparency = 1
+	hint.Size = UDim2.new(1, 0, 0, 40)
+	hint.Text = "Preview shows up after Create."
+	hint.TextWrapped = true
+	hint.Font = Enum.Font.SourceSans
+	hint.TextSize = 14
+	hint.Parent = container
+	Stage.hint = hint
+
+	local vpf = Instance.new("ViewportFrame")
+	vpf.AnchorPoint = Vector2.new(0.5, 0)
+	vpf.Position = UDim2.new(0.5, 0, 0, 3)
+	vpf.Size = UDim2.fromOffset(PREVIEW_SIZE, PREVIEW_SIZE)
+	vpf.BackgroundColor3 = Color3.new(0, 0, 0)
+	vpf.BorderSizePixel = 0
+	vpf.Ambient = Color3.new(1, 1, 1)
+	vpf.LightColor = Color3.new(0, 0, 0)
+	vpf.Visible = false
+	vpf.Parent = container
+	Stage.vpf = vpf
+
+	local cam = Instance.new("Camera")
+	cam.FieldOfView = FOV
+	cam.Parent = vpf
+	vpf.CurrentCamera = cam
+	Stage.cam = cam
+
+	local world = Instance.new("Folder")
+	world.Name = "World"
+	world.Parent = vpf
+	Stage.world = world
+end
+
+function Stage.setPreviewVisible(visible)
+	Stage.vpf.Visible = visible
+	Stage.hint.Visible = not visible
+end
+
+function Stage.rotatedBounds()
+	local rad = math.rad(State.rotation)
+	local cos, sin = math.abs(math.cos(rad)), math.abs(math.sin(rad))
+	local w = State.mapArea.X * cos + State.mapArea.Y * sin
+	local h = State.mapArea.X * sin + State.mapArea.Y * cos
+	return w, h
+end
+
+-- Math for the camera distance needed to fit the map area (boring stuff)
+function Stage.fitView(aspect)
+	local bw, bh = Stage.rotatedBounds()
+	local fov = FOV
+	local tan = math.tan(math.rad(fov / 2))
+
+	local dist = math.max(bh / (2 * tan), bw / (aspect * 2 * tan))
+	if dist > MAX_CAMERA_DISTANCE then
+		dist = MAX_CAMERA_DISTANCE
+		fov = math.deg(2 * math.atan(math.max(bh / 2, bw / (aspect * 2)) / dist))
+	end
+	return dist, fov, bw, bh
+end
+
+function Stage.cameraCFrame(dist)
+	local origin = State.stageOrigin
+	local pos = Vector3.new(origin.X, origin.Y + dist, origin.Z)
+	return CFrame.lookAt(pos, origin, Vector3.new(0, 0, -1))
+end
+
+local function getPreviewSize()
+	return math.clamp(UI.widget.AbsoluteSize.X - 30, 200, MAX_PREVIEW_SIZE)
+end
+
+function Stage.layoutPreview()
+	local bw, bh = Stage.rotatedBounds()
+	local box = getPreviewSize()
+	local ratio = bw / bh
+
+	local w, h = box, box
+	if ratio >= 1 then
+		h = box / ratio
+	else
+		w = box * ratio
+	end
+
+	Stage.vpf.Size = UDim2.fromOffset(w, h)
+	Stage.container.Size = UDim2.new(1, 0, 0, box + 6)
+	State.previewPxPerStud = h / bh
+	return w / h
+end
+
+-- Some parts are too thin to be visible in the preview so we thicken it a bit
+function Stage.thickenPreview()
+	local minW = MIN_LINE_PX / math.max(State.previewPxPerStud, 1e-6)
+
+	for twin, info in pairs(State.previewSizes) do
+		local sizes = { info.size.X, info.size.Y, info.size.Z }
+		for _, side in ipairs(info.flatSides) do
+			if sizes[side] < minW then sizes[side] = minW end
+		end
+
+		local want = Vector3.new(sizes[1], sizes[2], sizes[3])
+		if (twin.Size - want).Magnitude > 1e-4 then
+			twin.Size = want
+		end
+	end
+end
+
+function Stage.updateCamera()
+	if not (State.stage and State.cameraPart) then return end
+
+	local aspect = Stage.layoutPreview()
+	local dist, fov = Stage.fitView(aspect)
+	State.previewDist = dist
+
+	Stage.cam.FieldOfView = fov
+	State.cameraPart.CFrame = Stage.cameraCFrame(dist)
+	Stage.cam.CFrame = State.cameraPart.CFrame + State.previewOffset
+	Stage.thickenPreview()
+end
+
+function Stage.rebuildPreview()
+	Stage.world:ClearAllChildren()
+	State.previewCopies, State.previewSizes = {}, {}
+	if not (State.stage and State.cameraPart) then return end
+
+	local drop = Vector3.new(0, -math.clamp(State.previewDist * 0.01, 5, 80), 0)
+
+	for _, child in ipairs(State.stage:GetChildren()) do
+		local twin = child:Clone()
+		if twin then
+			if twin:IsA("BasePart") then
+				twin.CFrame = twin.CFrame + State.previewOffset
+				if twin:GetAttribute("MiniMapFloor") then
+					twin.CFrame = twin.CFrame + drop
+				end
+			end
+
+			if State.copiedPartSet[child] then
+				State.previewCopies[child] = twin
+				State.previewSizes[twin] = { size = twin.Size, flatSides = Util.horizontalAxes(twin) }
+			end
+			twin.Parent = Stage.world
+		end
+	end
+
+	Stage.cam.CFrame = State.cameraPart.CFrame + State.previewOffset
+	Stage.thickenPreview()
+	Stage.setPreviewVisible(true)
+end
+
+return Stage
+]]></ProtectedString>
+				<string name="ScriptGuid">{139F4BE0-13AA-4116-AE8B-275F902468B8}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">Stage</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX1D90435CF12245A682E1E9D446E4B050">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- State module
+-- This is used to store variables shared across modules that are often changed during use of plugin
+
+local State = {
+	plugin = nil,
+	exceptions = nil,
+	blacklist = nil,
+	rebuildIfShowing = function() end,
+
+	geometryPath = { "DebugMission", "Geometry" },
+	glassPath = { "DebugMission", "Glass" },
+	propsPath = { "DebugMission", "Props" },
+	mapDataPath = { "DebugMission", "MapData" },
+	stageFolderName = "MissionMiniMapCreator_Stage",
+	stageCenter = Vector3.new(-30000, 500, -30000),
+
+	rotation = 0,
+	minSize = 0.5,
+	minSpanPercent = 30,
+
+	partFilter = "All",
+	mapStyle = "Default",
+	thickenWalls = false,
+
+	selectedFloorKey = nil,
+	stage = nil,
+	cameraPart = nil,
+	stageOrigin = Vector3.zero,
+	mapArea = Vector2.new(100, 100),
+	busy = false,
+
+	copiedParts = {},
+	copiedPartSet = {},
+	previewCopies = {},
+	previewSizes = {},
+	previewPxPerStud = 1,
+	previewDist = 1000,
+}
+
+State.previewOffset = -State.stageCenter
+
+return State]]></ProtectedString>
+				<string name="ScriptGuid">{C52EF881-E428-4A1B-8473-3734F4BCE55A}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">State</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX3840B75130AA4D16A0B42B8B25602462">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- Util(ity) module
+-- Helper functions for various modules such as MapData and PartLists.
+
+local State = require(script.Parent.State)
+
+local Util = {}
+
+function Util.isBall(part)
+	return part:IsA("Part") and part.Shape == Enum.PartType.Ball
+end
+
+function Util.isVisible(part)
+	return part.Transparency < 0.95
+end
+
+function Util.sortedSize(size)
+	local sizes = { size.X, size.Y, size.Z }
+	table.sort(sizes)
+	return sizes
+end
+
+function Util.colorsClose(c1, c2)
+	return math.abs(c1.R - c2.R) < 0.004 and math.abs(c1.G - c2.G) < 0.004 and math.abs(c1.B - c2.B) < 0.004
+end
+
+function Util.matchesList(part, entries)
+	local size = nil
+	for _, entry in ipairs(entries) do
+		if entry.part == part then return true end
+
+		if entry.matchAll and part.Material.Name == entry.material and Util.colorsClose(part.Color, entry.color) then
+			size = size or Util.sortedSize(part.Size)
+			if math.abs(size[1] - entry.sortedSize[1]) < 0.01
+				and math.abs(size[2] - entry.sortedSize[2]) < 0.01
+				and math.abs(size[3] - entry.sortedSize[3]) < 0.01 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+function Util.boundsOfCFrame(cf, size, frame)
+	if frame then cf = frame:ToObjectSpace(cf) end
+	local right, up, look = cf.RightVector, cf.UpVector, cf.LookVector
+	local halfX, halfY, halfZ = size.X / 2, size.Y / 2, size.Z / 2
+	local ext = Vector3.new(
+		math.abs(right.X) * halfX + math.abs(up.X) * halfY + math.abs(look.X) * halfZ,
+		math.abs(right.Y) * halfX + math.abs(up.Y) * halfY + math.abs(look.Y) * halfZ,
+		math.abs(right.Z) * halfX + math.abs(up.Z) * halfY + math.abs(look.Z) * halfZ
+	)
+	return cf.Position - ext, cf.Position + ext
+end
+
+function Util.partBounds(part)
+	return Util.boundsOfCFrame(part.CFrame, part.Size)
+end
+
+function Util.boundsInFrame(part, frame)
+	return Util.boundsOfCFrame(part.CFrame, part.Size, frame)
+end
+
+function Util.hasCondition(inst, rootFolder)
+	while inst and inst ~= rootFolder do
+		if inst:GetAttribute("Condition") ~= nil then return true end
+		inst = inst.Parent
+	end
+	return false
+end
+
+function Util.getFolder(path)
+	local folder = workspace
+	for _, name in ipairs(path) do
+		folder = folder and folder:FindFirstChild(name)
+	end
+	return folder
+end
+
+function Util.verticalSide(part)
+	local cf = part.CFrame
+	local tilt = { math.abs(cf.RightVector.Y), math.abs(cf.UpVector.Y), math.abs(cf.LookVector.Y) }
+	local side = 1
+	if tilt[2] > tilt[side] then side = 2 end
+	if tilt[3] > tilt[side] then side = 3 end
+	return side, tilt[side]
+end
+
+function Util.isUpright(part)
+	local _, alignment = Util.verticalSide(part)
+	return alignment >= math.cos(math.rad(2))
+end
+
+function Util.horizontalAxes(part)
+	local vertical = Util.verticalSide(part)
+	local flat = {}
+	for side = 1, 3 do
+		if side ~= vertical then table.insert(flat, side) end
+	end
+	return flat
+end
+
+function Util.passesFilter(part)
+	if Util.isBall(part) then return false end
+	local filter = State.partFilter
+	if filter == "All" then return true end
+	if part:IsA("MeshPart") then return filter == "PartsAndMeshes" end
+	if part:IsA("PartOperation") then return false end
+	return part:IsA("Part") or part:IsA("WedgePart") or part:IsA("CornerWedgePart")
+end
+
+local function sideDirection(part, side)
+	local cf = part.CFrame
+	if side == 1 then return cf.RightVector end
+	if side == 2 then return cf.UpVector end
+	return cf.LookVector
+end
+
+local function sideLength(part, side)
+	local size = part.Size
+	if side == 1 then return size.X end
+	if side == 2 then return size.Y end
+	return size.Z
+end
+
+local function sideways(direction)
+	local flat = Vector3.new(direction.X, 0, direction.Z)
+	if flat.Magnitude < 1e-4 then return nil end
+	return flat.Unit
+end
+
+function Util.describeFlatSides(part, anyTilt)
+	if not anyTilt and not Util.isUpright(part) then return nil end
+
+	local flat = Util.horizontalAxes(part)
+	local thinSide, longSide = flat[1], flat[2]
+	if sideLength(part, thinSide) > sideLength(part, longSide) then
+		thinSide, longSide = longSide, thinSide
+	end
+
+	local thinDir = sideways(sideDirection(part, thinSide))
+	local longDir = sideways(sideDirection(part, longSide))
+	if not (thinDir and longDir) then return nil end
+
+	local pos = part.Position
+	return {
+		thinSide = thinSide,
+		thin = sideLength(part, thinSide),
+		thinDir = thinDir,
+		long = sideLength(part, longSide),
+		longDir = longDir,
+		position = Vector3.new(pos.X, 0, pos.Z),
+	}
+end
+
+function Util.glassRegion(glass)
+	local region = Util.describeFlatSides(glass, true)
+	if not region then return nil end
+
+	local low, high = Util.partBounds(glass)
+	region.frame = CFrame.fromMatrix(region.position, region.longDir, Vector3.yAxis)
+	region.lowY = low.Y
+	region.highY = high.Y
+	return region
+end
+
+function Util.isBesideGlass(part, glassRegions)
+	for _, region in ipairs(glassRegions) do
+		local low, high = Util.boundsInFrame(part, region.frame)
+		local gapAlong = math.max(low.X - region.long / 2, -region.long / 2 - high.X, 0)
+		local gapAcross = math.max(low.Z - region.thin / 2, -region.thin / 2 - high.Z, 0)
+		local sharedHeight = math.min(high.Y, region.highY) - math.max(low.Y, region.lowY)
+
+		if gapAlong <= 0.5 and gapAcross <= 0.5 and sharedHeight > -0.5 then
+			return true
+		end
+	end
+	return false
+end
+
+-- Gotta exclude pillars and very thick walls so that they don't count as normal walls
+local function wallInfo(part)
+	if part:IsA("Part") and part.Shape ~= Enum.PartType.Block then return nil end
+	if part:IsA("WedgePart") or part:IsA("CornerWedgePart") or part:IsA("TrussPart") then return nil end
+
+	local info = Util.describeFlatSides(part)
+	if not info then return nil end
+	if info.long < info.thin * 2.5 then return nil end
+	if info.thin > 4 then return nil end
+	return info
+end
+
+-- Thicken only the walls that are thinner than the average
+function Util.thicken(parts)
+	local walls = {}
+	local total = 0
+
+	for _, part in ipairs(parts) do
+		local info = wallInfo(part)
+		if info then
+			table.insert(walls, { part = part, info = info })
+			total += info.thin
+		end
+	end
+	if #walls == 0 then return end
+
+	local mean = total / #walls
+	for _, wall in ipairs(walls) do
+		if wall.info.thin < mean - 0.01 then
+			local size = wall.part.Size
+			local side = wall.info.thinSide
+			wall.part.Size = Vector3.new(
+				side == 1 and mean or size.X,
+				side == 2 and mean or size.Y,
+				side == 3 and mean or size.Z
+			)
+		end
+	end
+end
+
+return Util
+]]></ProtectedString>
+				<string name="ScriptGuid">{97174656-22EB-4E26-BA34-0797F85790FA}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">Util</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+	</Item>
+	<SharedStrings>
+		<SharedString md5="yuZpQdnvvUBOTYh1jqZ2cA=="></SharedString>
+	</SharedStrings>
+</roblox>
