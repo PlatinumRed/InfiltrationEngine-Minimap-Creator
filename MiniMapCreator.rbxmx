@@ -1,21 +1,36 @@
 <roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
 	<External>null</External>
 	<External>nil</External>
-	<Item class="Script" referent="RBX762D1D4F0E1444A4B8710772ADAD628B">
+	<Item class="Folder" referent="RBX3E094AD6395946E487C1780710FD5474">
 		<Properties>
-			<ProtectedString name="Source"><![CDATA[--[[
-	Minimap Creator v1.1
+			<Color3 name="IconTint">
+				<R>0</R>
+				<G>0</G>
+				<B>0</B>
+			</Color3>
+			<BinaryString name="AttributesSerialize"></BinaryString>
+			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+			<bool name="DefinesCapabilities">false</bool>
+			<string name="Name">Plugin</string>
+			<BinaryString name="SerializedOverrides"></BinaryString>
+			<int64 name="SourceAssetId">-1</int64>
+			<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+		</Properties>
+		<Item class="Script" referent="RBX66553F733A34448AB77F52E1081EA63D">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[--[[
+	Minimap Creator v1.11
 	by: Red_Platinum
 ]]
 
 local Selection = game:GetService("Selection")
 
-local State = require(script.State)
-local UI = require(script.UI)
-local Stage = require(script.Stage)
-local PartLists = require(script.PartLists)
-local MapData = require(script.MapData)
-local Builder = require(script.Builder)
+local State = require(script.Parent.State)
+local UI = require(script.Parent.UI)
+local Stage = require(script.Parent.Stage)
+local PartLists = require(script.Parent.PartLists)
+local MapData = require(script.Parent.MapData)
+local Builder = require(script.Parent.Builder)
 
 State.plugin = plugin
 
@@ -50,6 +65,94 @@ local windowCount = 0
 local isOpening = false
 local isClosing = false
 local closeWindow
+
+local function refreshSelectButton()
+	if State.selectedFloorKey then
+		UI.selectBtn.Text = "Select  (Floor " .. State.selectedFloorKey .. ")"
+	else
+		UI.selectBtn.Text = "Select"
+	end
+end
+
+local function describeFloor(floorKey)
+	local floor, err = MapData.resolveFloor(floorKey)
+	if not floor then
+		UI.infoLabel.Text = tostring(err)
+		return nil
+	end
+	if floor.above then
+		UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up to '%s' (Y %.1f)."):format(
+			floorKey, floor.part.Name, floor.lowY, floor.above.Name, floor.highY)
+	else
+		UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up %d studs (no part above it)."):format(
+			floorKey, floor.part.Name, floor.lowY, floor.highY - floor.lowY)
+	end
+	return floor
+end
+
+local function chooseFloor(floorKey)
+	State.selectedFloorKey = floorKey
+	UI.dropdown.Visible = false
+	refreshSelectButton()
+
+	local floor = describeFloor(floorKey)
+	if not floor then return end
+	Selection:Set(floor.above and { floor.part, floor.above } or { floor.part })
+
+	if State.stage and not State.busy then
+		Builder.create()
+	else
+		UI.setStatus("Floor " .. floorKey .. " selected. Press Create.")
+	end
+end
+
+local function populateDropdown(floors)
+	for _, child in ipairs(UI.dropdown:GetChildren()) do
+		if child:IsA("TextButton") then child:Destroy() end
+	end
+	for index, floorEntry in ipairs(floors) do
+		local floorButton = Instance.new("TextButton")
+		floorButton.Text = "Floor " .. floorEntry.key
+		floorButton.Font = Enum.Font.SourceSans
+		floorButton.TextSize = 14
+		floorButton.Size = UDim2.new(1, -6, 0, 24)
+		floorButton.LayoutOrder = index
+		floorButton.BorderSizePixel = 0
+		UI.Theme(floorButton, "button")
+		floorButton.Parent = UI.dropdown
+		floorButton.Activated:Connect(function() chooseFloor(floorEntry.key) end)
+	end
+	UI.dropdown.Size = UDim2.new(1, 0, 0, math.min(#floors * 26 + 8, 170))
+end
+
+local function refreshStyleButtons()
+	UI.defaultBtn.Text = (State.mapStyle == "Default") and "> Default <" or "Default"
+	UI.outlineBtn.Text = (State.mapStyle == "Outline") and "> Outline <" or "Outline"
+end
+
+local function setMapStyle(name)
+	State.mapStyle = name
+	plugin:SetSetting("MapStyle", name)
+	refreshStyleButtons()
+	Stage.applyStyle()
+end
+
+local function refreshFilterButtons()
+	UI.partsBtn.Text = (State.partFilter == "PartsOnly") and "● Parts Only" or "Parts Only"
+	UI.meshesBtn.Text = (State.partFilter == "PartsAndMeshes") and "● Parts + Meshes" or "Parts + Meshes"
+	UI.allBtn.Text = (State.partFilter == "All") and "● All" or "All"
+end
+
+local function setPartFilter(name)
+	State.partFilter = name
+	plugin:SetSetting("PartFilter", name)
+	refreshFilterButtons()
+	State.rebuildIfShowing()
+end
+
+local function refreshThickenButton()
+	UI.thickenBtn.Text = "Thicken thin walls to the average: " .. (State.thickenWalls and "ON" or "OFF")
+end
 
 local function buildWindow()
 	windowCount += 1
@@ -113,65 +216,6 @@ local function buildWindow()
 
 	UI.refreshNumbers()
 
-	local function refreshSelectButton()
-		if State.selectedFloorKey then
-			UI.selectBtn.Text = "Select  (Floor " .. State.selectedFloorKey .. ")"
-		else
-			UI.selectBtn.Text = "Select"
-		end
-	end
-
-	local function describeFloor(floorKey)
-		local floor, err = MapData.resolveFloor(floorKey)
-		if not floor then
-			UI.infoLabel.Text = tostring(err)
-			return nil
-		end
-		if floor.above then
-			UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up to '%s' (Y %.1f)."):format(
-				floorKey, floor.part.Name, floor.lowY, floor.above.Name, floor.highY)
-		else
-			UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up %d studs (no part above it)."):format(
-				floorKey, floor.part.Name, floor.lowY, floor.highY - floor.lowY)
-		end
-		return floor
-	end
-
-	local function chooseFloor(floorKey)
-		State.selectedFloorKey = floorKey
-		UI.dropdown.Visible = false
-		refreshSelectButton()
-
-		local floor = describeFloor(floorKey)
-		if not floor then return end
-		Selection:Set(floor.above and { floor.part, floor.above } or { floor.part })
-
-		if State.stage and not State.busy then
-			Builder.create()
-		else
-			UI.setStatus("Floor " .. floorKey .. " selected. Press Create.")
-		end
-	end
-
-	local function populateDropdown(floors)
-		for _, child in ipairs(UI.dropdown:GetChildren()) do
-			if child:IsA("TextButton") then child:Destroy() end
-		end
-		for index, floorEntry in ipairs(floors) do
-			local floorButton = Instance.new("TextButton")
-			floorButton.Text = "Floor " .. floorEntry.key
-			floorButton.Font = Enum.Font.SourceSans
-			floorButton.TextSize = 14
-			floorButton.Size = UDim2.new(1, -6, 0, 24)
-			floorButton.LayoutOrder = index
-			floorButton.BorderSizePixel = 0
-			UI.Theme(floorButton, "button")
-			floorButton.Parent = UI.dropdown
-			floorButton.Activated:Connect(function() chooseFloor(floorEntry.key) end)
-		end
-		UI.dropdown.Size = UDim2.new(1, 0, 0, math.min(#floors * 26 + 8, 170))
-	end
-
 	UI.selectBtn.Activated:Connect(function()
 		if UI.dropdown.Visible then
 			UI.dropdown.Visible = false
@@ -191,41 +235,12 @@ local function buildWindow()
 		UI.setStatus("Choose a floor from the list.")
 	end)
 
-	local function refreshStyleButtons()
-		UI.defaultBtn.Text = (State.mapStyle == "Default") and "> Default <" or "Default"
-		UI.outlineBtn.Text = (State.mapStyle == "Outline") and "> Outline <" or "Outline"
-	end
-
-	local function setMapStyle(name)
-		State.mapStyle = name
-		plugin:SetSetting("MapStyle", name)
-		refreshStyleButtons()
-		Stage.applyStyle()
-	end
-
 	UI.defaultBtn.Activated:Connect(function() setMapStyle("Default") end)
 	UI.outlineBtn.Activated:Connect(function() setMapStyle("Outline") end)
-
-	local function refreshFilterButtons()
-		UI.partsBtn.Text = (State.partFilter == "PartsOnly") and "● Parts Only" or "Parts Only"
-		UI.meshesBtn.Text = (State.partFilter == "PartsAndMeshes") and "● Parts + Meshes" or "Parts + Meshes"
-		UI.allBtn.Text = (State.partFilter == "All") and "● All" or "All"
-	end
-
-	local function setPartFilter(name)
-		State.partFilter = name
-		plugin:SetSetting("PartFilter", name)
-		refreshFilterButtons()
-		State.rebuildIfShowing()
-	end
 
 	UI.partsBtn.Activated:Connect(function() setPartFilter("PartsOnly") end)
 	UI.meshesBtn.Activated:Connect(function() setPartFilter("PartsAndMeshes") end)
 	UI.allBtn.Activated:Connect(function() setPartFilter("All") end)
-
-	local function refreshThickenButton()
-		UI.thickenBtn.Text = "Thicken thin walls to the average: " .. (State.thickenWalls and "ON" or "OFF")
-	end
 
 	UI.thickenBtn.Activated:Connect(function()
 		State.thickenWalls = not State.thickenWalls
@@ -310,375 +325,21 @@ plugin.Unloading:Connect(function()
 	Stage.clear()
 end)
 
-toolbarButton:SetActive(false)
-]]></ProtectedString>
-			<bool name="Disabled">false</bool>
-			<Content name="LinkedSource"><null></null></Content>
-			<token name="RunContext">0</token>
-			<string name="ScriptGuid">{9189B4AB-D226-4CEA-B2A3-C8BC5F77F803}</string>
-			<BinaryString name="AttributesSerialize"></BinaryString>
-			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
-			<bool name="DefinesCapabilities">false</bool>
-			<string name="Name">Main</string>
-			<BinaryString name="SerializedOverrides"></BinaryString>
-			<int64 name="SourceAssetId">-1</int64>
-			<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
-		</Properties>
-		<Item class="ModuleScript" referent="RBXABEDCFEAA4424D6DAAE629E904878508">
-			<Properties>
+toolbarButton:SetActive(false)]]></ProtectedString>
+				<bool name="Disabled">false</bool>
 				<Content name="LinkedSource"><null></null></Content>
-				<ProtectedString name="Source"><![CDATA[-- UI module
--- This module handles the UI. Yup, that's it.
--- This was a lot more work than I expected going in though not gonna lie.
-
-local State = require(script.Parent.State)
-
-local UI = {}
-
-local function getTheme(obj, objType)
-	local theme = settings().Studio.Theme
-	local themeColor = Enum.StudioStyleGuideColor
-	if objType == "bg" then
-		obj.BackgroundColor3 = theme:GetColor(themeColor.MainBackground)
-	elseif objType == "panel" then
-		obj.BackgroundColor3 = theme:GetColor(themeColor.InputFieldBackground)
-		obj.BorderColor3 = theme:GetColor(themeColor.InputFieldBorder)
-	elseif objType == "button" then
-		obj.BackgroundColor3 = theme:GetColor(themeColor.Button)
-		obj.TextColor3 = theme:GetColor(themeColor.ButtonText)
-		obj.BorderColor3 = theme:GetColor(themeColor.ButtonBorder)
-	elseif objType == "label" then
-		obj.TextColor3 = theme:GetColor(themeColor.MainText)
-	elseif objType == "sub" then
-		obj.TextColor3 = theme:GetColor(themeColor.SubText)
-	elseif objType == "input" then
-		obj.BackgroundColor3 = theme:GetColor(themeColor.InputFieldBackground)
-		obj.TextColor3 = theme:GetColor(themeColor.MainText)
-		obj.BorderColor3 = theme:GetColor(themeColor.InputFieldBorder)
-	end
-end
-
-local Elements = {}
-
-local function reg(inst, objType)
-	table.insert(Elements, { inst, objType })
-	getTheme(inst, objType)
-	return inst
-end
-
-function UI.applyTheme()
-	for _, element in ipairs(Elements) do
-		getTheme(element[1], element[2])
-	end
-end
-
-UI.Theme = getTheme
-UI.reg = reg
-UI.updatingUI = false
-
-function UI.makeButton(text, layoutOrder, parent, size)
-	local button = reg(Instance.new("TextButton"), "button")
-	button.Text = text
-	button.Font = Enum.Font.SourceSansBold
-	button.TextSize = 15
-	button.Size = size or UDim2.new(1, 0, 0, 30)
-	button.BorderSizePixel = 1
-	button.LayoutOrder = layoutOrder
-	button.Parent = parent or UI.content
-	return button
-end
-
-function UI.numberRow(labelText, layoutOrder, step, onStep, onTyped)
-	local row = Instance.new("Frame")
-	row.BackgroundTransparency = 1
-	row.Size = UDim2.new(1, 0, 0, 28)
-	row.LayoutOrder = layoutOrder
-	row.Parent = UI.content
-
-	local rowLayout = Instance.new("UIListLayout")
-	rowLayout.FillDirection = Enum.FillDirection.Horizontal
-	rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-	rowLayout.Padding = UDim.new(0, 6)
-	rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	rowLayout.Parent = row
-
-	local nameLabel = reg(Instance.new("TextLabel"), "label")
-	nameLabel.Text = labelText
-	nameLabel.BackgroundTransparency = 1
-	nameLabel.Font = Enum.Font.SourceSans
-	nameLabel.TextSize = 14
-	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-	nameLabel.Size = UDim2.new(0, 70, 1, 0)
-	nameLabel.LayoutOrder = 1
-	nameLabel.Parent = row
-
-	local minusBtn = UI.makeButton("-", 2, row, UDim2.new(0, 28, 1, 0))
-
-	local valueBox = reg(Instance.new("TextBox"), "input")
-	valueBox.Font = Enum.Font.SourceSans
-	valueBox.TextSize = 14
-	valueBox.ClearTextOnFocus = false
-	valueBox.BorderSizePixel = 1
-	valueBox.Size = UDim2.new(1, -(70 + 28 + 28 + 18), 1, 0)
-	valueBox.LayoutOrder = 3
-	valueBox.Parent = row
-
-	local plusBtn = UI.makeButton("+", 4, row, UDim2.new(0, 28, 1, 0))
-
-	minusBtn.Activated:Connect(function() onStep(-step) end)
-	plusBtn.Activated:Connect(function() onStep(step) end)
-	valueBox:GetPropertyChangedSignal("Text"):Connect(function()
-		if UI.updatingUI then return end
-		local typedNumber = tonumber(valueBox.Text)
-		if typedNumber then onTyped(typedNumber) end
-	end)
-
-	return valueBox
-end
-
-function UI.setStatus(message, isError)
-	UI.statusLabel.Text = message
-	if isError then
-		UI.statusLabel.TextColor3 = Color3.fromRGB(230, 90, 90)
-	else
-		getTheme(UI.statusLabel, "sub")
-	end
-end
-
-function UI.refreshNumbers()
-	UI.updatingUI = true
-	UI.rotationBox.Text = string.format("%.1f", State.rotation)
-	UI.minSizeBox.Text = string.format("%g", State.minSize)
-	UI.minSpanBox.Text = string.format("%g", State.minSpanPercent)
-	UI.updatingUI = false
-end
-
-function UI.buildUI(plugin, widgetId)
-	table.clear(Elements)
-
-	local windowInfo = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, true, 360, 600, 360, 360)
-	local widget = plugin:CreateDockWidgetPluginGuiAsync(widgetId, windowInfo)
-	widget.Title = "Minimap Creator"
-	UI.widget = widget
-
-	local content = reg(Instance.new("ScrollingFrame"), "bg")
-	content.Size = UDim2.fromScale(1, 1)
-	content.BorderSizePixel = 0
-	content.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	content.CanvasSize = UDim2.new()
-	content.ScrollBarThickness = 6
-	content.Parent = widget
-	UI.content = content
-	do
-		local pad = Instance.new("UIPadding")
-		pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
-		pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 8), UDim.new(0, 14)
-		pad.Parent = content
-		local list = Instance.new("UIListLayout")
-		list.Padding = UDim.new(0, 6)
-		list.SortOrder = Enum.SortOrder.LayoutOrder
-		list.Parent = content
-	end
-
-	local title = reg(Instance.new("TextLabel"), "label")
-	title.Text = "Minimap Creator"
-	title.Size = UDim2.new(1, 0, 0, 30)
-	title.BackgroundTransparency = 1
-	title.Font = Enum.Font.SourceSansBold
-	title.TextSize = 18
-	title.Parent = content
-
-	local selectBtn = reg(Instance.new("TextButton"), "button")
-	selectBtn.Text = "Select"
-	selectBtn.Font = Enum.Font.SourceSansBold
-	selectBtn.TextSize = 15
-	selectBtn.Size = UDim2.new(1, 0, 0, 30)
-	selectBtn.BorderSizePixel = 1
-	selectBtn.LayoutOrder = 2
-	selectBtn.Parent = content
-	UI.selectBtn = selectBtn
-
-	local dropdown = reg(Instance.new("ScrollingFrame"), "panel")
-	dropdown.Size = UDim2.new(1, 0, 0, 100)
-	dropdown.BorderSizePixel = 1
-	dropdown.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	dropdown.CanvasSize = UDim2.new()
-	dropdown.ScrollBarThickness = 6
-	dropdown.Visible = false
-	dropdown.LayoutOrder = 3
-	dropdown.Parent = content
-	UI.dropdown = dropdown
-
-	local dropdownPad = Instance.new("UIPadding")
-	dropdownPad.PaddingTop, dropdownPad.PaddingBottom = UDim.new(0, 3), UDim.new(0, 3)
-	dropdownPad.PaddingLeft, dropdownPad.PaddingRight = UDim.new(0, 3), UDim.new(0, 3)
-	dropdownPad.Parent = dropdown
-
-	local dropdownList = Instance.new("UIListLayout")
-	dropdownList.Padding = UDim.new(0, 2)
-	dropdownList.SortOrder = Enum.SortOrder.LayoutOrder
-	dropdownList.Parent = dropdown
-
-	local infoLabel = reg(Instance.new("TextLabel"), "sub")
-	infoLabel.Text = "No floor selected."
-	infoLabel.BackgroundTransparency = 1
-	infoLabel.Font = Enum.Font.SourceSans
-	infoLabel.TextSize = 13
-	infoLabel.TextXAlignment = Enum.TextXAlignment.Left
-	infoLabel.TextYAlignment = Enum.TextYAlignment.Top
-	infoLabel.TextWrapped = true
-	infoLabel.AutomaticSize = Enum.AutomaticSize.Y
-	infoLabel.Size = UDim2.new(1, 0, 0, 0)
-	infoLabel.LayoutOrder = 4
-	infoLabel.Parent = content
-	UI.infoLabel = infoLabel
-
-	local createBtn = reg(Instance.new("TextButton"), "button")
-	createBtn.Text = "Create"
-	createBtn.Font = Enum.Font.SourceSansBold
-	createBtn.TextSize = 15
-	createBtn.Size = UDim2.new(1, 0, 0, 30)
-	createBtn.BorderSizePixel = 1
-	createBtn.LayoutOrder = 5
-	createBtn.Parent = content
-	UI.createBtn = createBtn
-
-	local saveBtn = reg(Instance.new("TextButton"), "button")
-	saveBtn.Text = "Save"
-	saveBtn.Font = Enum.Font.SourceSansBold
-	saveBtn.TextSize = 15
-	saveBtn.Size = UDim2.new(1, 0, 0, 30)
-	saveBtn.BorderSizePixel = 1
-	saveBtn.LayoutOrder = 6
-	saveBtn.Parent = content
-	UI.saveBtn = saveBtn
-
-	local styleRow = Instance.new("Frame")
-	styleRow.BackgroundTransparency = 1
-	styleRow.Size = UDim2.new(1, 0, 0, 28)
-	styleRow.LayoutOrder = 7
-	styleRow.Parent = content
-
-	local styleLayout = Instance.new("UIListLayout")
-	styleLayout.FillDirection = Enum.FillDirection.Horizontal
-	styleLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-	styleLayout.Padding = UDim.new(0, 6)
-	styleLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	styleLayout.Parent = styleRow
-
-	local defaultBtn = reg(Instance.new("TextButton"), "button")
-	defaultBtn.Text = "Default"
-	defaultBtn.Font = Enum.Font.SourceSansBold
-	defaultBtn.TextSize = 15
-	defaultBtn.Size = UDim2.new(0.5, -3, 1, 0)
-	defaultBtn.BorderSizePixel = 1
-	defaultBtn.LayoutOrder = 1
-	defaultBtn.Parent = styleRow
-	UI.defaultBtn = defaultBtn
-
-	local outlineBtn = reg(Instance.new("TextButton"), "button")
-	outlineBtn.Text = "Outline"
-	outlineBtn.Font = Enum.Font.SourceSansBold
-	outlineBtn.TextSize = 15
-	outlineBtn.Size = UDim2.new(0.5, -3, 1, 0)
-	outlineBtn.BorderSizePixel = 1
-	outlineBtn.LayoutOrder = 2
-	outlineBtn.Parent = styleRow
-	UI.outlineBtn = outlineBtn
-
-	local filterRow = Instance.new("Frame")
-	filterRow.BackgroundTransparency = 1
-	filterRow.Size = UDim2.new(1, 0, 0, 28)
-	filterRow.LayoutOrder = 8
-	filterRow.Parent = content
-
-	local filterLayout = Instance.new("UIListLayout")
-	filterLayout.FillDirection = Enum.FillDirection.Horizontal
-	filterLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-	filterLayout.Padding = UDim.new(0, 6)
-	filterLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	filterLayout.Parent = filterRow
-
-	local partsBtn = reg(Instance.new("TextButton"), "button")
-	partsBtn.Text = "Parts Only"
-	partsBtn.Font = Enum.Font.SourceSansBold
-	partsBtn.TextScaled = true
-	partsBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
-	partsBtn.BorderSizePixel = 1
-	partsBtn.LayoutOrder = 1
-	partsBtn.Parent = filterRow
-	local partsLimit = Instance.new("UITextSizeConstraint")
-	partsLimit.MaxTextSize, partsLimit.MinTextSize = 14, 8
-	partsLimit.Parent = partsBtn
-	UI.partsBtn = partsBtn
-
-	local meshesBtn = reg(Instance.new("TextButton"), "button")
-	meshesBtn.Text = "Parts + Meshes"
-	meshesBtn.Font = Enum.Font.SourceSansBold
-	meshesBtn.TextScaled = true
-	meshesBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
-	meshesBtn.BorderSizePixel = 1
-	meshesBtn.LayoutOrder = 2
-	meshesBtn.Parent = filterRow
-	local meshesLimit = Instance.new("UITextSizeConstraint")
-	meshesLimit.MaxTextSize, meshesLimit.MinTextSize = 14, 8
-	meshesLimit.Parent = meshesBtn
-	UI.meshesBtn = meshesBtn
-
-	local allBtn = reg(Instance.new("TextButton"), "button")
-	allBtn.Text = "All"
-	allBtn.Font = Enum.Font.SourceSansBold
-	allBtn.TextScaled = true
-	allBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
-	allBtn.BorderSizePixel = 1
-	allBtn.LayoutOrder = 3
-	allBtn.Parent = filterRow
-	local allLimit = Instance.new("UITextSizeConstraint")
-	allLimit.MaxTextSize, allLimit.MinTextSize = 14, 8
-	allLimit.Parent = allBtn
-	UI.allBtn = allBtn
-
-	local thickenBtn = reg(Instance.new("TextButton"), "button")
-	thickenBtn.Text = "Thicken thin walls to the average"
-	thickenBtn.Font = Enum.Font.SourceSansBold
-	thickenBtn.TextSize = 15
-	thickenBtn.Size = UDim2.new(1, 0, 0, 30)
-	thickenBtn.BorderSizePixel = 1
-	thickenBtn.LayoutOrder = 9
-	thickenBtn.Parent = content
-	UI.thickenBtn = thickenBtn
-
-	local statusLabel = reg(Instance.new("TextLabel"), "sub")
-	statusLabel.Text = "Use Select to pick a floor."
-	statusLabel.BackgroundTransparency = 1
-	statusLabel.Font = Enum.Font.SourceSans
-	statusLabel.TextSize = 13
-	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-	statusLabel.TextYAlignment = Enum.TextYAlignment.Top
-	statusLabel.TextWrapped = true
-	statusLabel.AutomaticSize = Enum.AutomaticSize.Y
-	statusLabel.Size = UDim2.new(1, 0, 0, 0)
-	statusLabel.LayoutOrder = 19
-	statusLabel.Parent = content
-	UI.statusLabel = statusLabel
-
-	if UI.themeConnection then UI.themeConnection:Disconnect() end
-	UI.themeConnection = settings().Studio.ThemeChanged:Connect(UI.applyTheme)
-end
-
-return UI
-]]></ProtectedString>
-				<string name="ScriptGuid">{97E46D10-9347-45ED-9643-C97A3947DB42}</string>
+				<token name="RunContext">0</token>
+				<string name="ScriptGuid">{9189B4AB-D226-4CEA-B2A3-C8BC5F77F803}</string>
 				<BinaryString name="AttributesSerialize"></BinaryString>
 				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
 				<bool name="DefinesCapabilities">false</bool>
-				<string name="Name">UI</string>
+				<string name="Name">Main</string>
 				<BinaryString name="SerializedOverrides"></BinaryString>
 				<int64 name="SourceAssetId">-1</int64>
 				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX2EBC6D2CE18549F9815D359848B8935E">
+		<Item class="ModuleScript" referent="RBX08133568CFD44DB88F1B01B6378230D3">
 			<Properties>
 				<Content name="LinkedSource"><null></null></Content>
 				<ProtectedString name="Source"><![CDATA[-- Builder module
@@ -737,6 +398,84 @@ local function createCameraPart(stage)
 	cp.CanCollide, cp.CanQuery, cp.CanTouch, cp.CastShadow = false, false, false, false
 	cp.Parent = stage
 	return cp
+end
+
+local function isAboveDoor(part, doorBoxes)
+	if #doorBoxes == 0 then return false end
+
+	local pLow, pHigh = Util.partBounds(part)
+	for _, doorBox in ipairs(doorBoxes) do
+		local ox = math.min(pHigh.X, doorBox.high.X) - math.max(pLow.X, doorBox.low.X)
+		local oz = math.min(pHigh.Z, doorBox.high.Z) - math.max(pLow.Z, doorBox.low.Z)
+		if ox > 0.1 and oz > 0.1 and pLow.Y >= doorBox.high.Y - 1.5 then
+			return true
+		end
+	end
+	return false
+end
+
+-- Original here is used for when glass parts are copied over to the minimap from PartCollection(s)
+local function consider(
+	part, isGlass, original, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+	floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+)
+	local listPart = original or part
+	if seen[part] then return considered end
+	seen[part] = true
+
+	if not part:IsA("BasePart") or part:IsA("Terrain") or Util.isBall(part) then return considered end
+
+	local pLow, pHigh = Util.boundsInFrame(part, frame)
+	local inside = pLow.X <= selHigh.X and pHigh.X >= selLow.X
+		and pLow.Y <= selHigh.Y and pHigh.Y >= selLow.Y
+		and pLow.Z <= selHigh.Z and pHigh.Z >= selLow.Z
+	if not inside then return considered end
+	considered += 1
+
+	if #blackEntries > 0 and Util.matchesList(listPart, blackEntries) then return considered end
+
+	local isException = #excEntries > 0 and Util.matchesList(listPart, excEntries)
+
+	if floorHeight and not isException and pHigh.Y <= floorY + 0.25 then return considered end
+	if not isException and isAboveDoor(part, doorBoxes) then return considered end
+
+	if not (isGlass or isException) then
+		if stairParts[part] then return considered end
+		if not Util.isVisible(part) then return considered end
+
+		local bsize = pHigh - pLow
+		local flatSlab = bsize.Y < bsize.X and bsize.Y < bsize.Z
+
+		local beside = not flatSlab and #glassRegions > 0 and Util.isBesideGlass(part, glassRegions)
+		if not beside then
+			local size = part.Size
+			local span = (math.min(pHigh.Y, selHigh.Y) - math.max(pLow.Y, floorY)) / spanRange * 100
+
+			if flatSlab
+				or not Util.passesFilter(part)
+				or not Util.isUpright(part)
+				or math.min(size.X, size.Y, size.Z) < State.minSize
+				or span < State.minSpanPercent then
+				return considered
+			end
+		end
+	end
+
+	local copy = part:Clone()
+	if not copy then return considered end
+
+	Stage.styleWall(copy)
+	copy.Color = Stage.styleColor(copy)
+	copy.CFrame = toStage * copy.CFrame
+	copy.Parent = newStage
+	table.insert(copies, copy)
+
+	if isGlass then
+		local region = Util.glassRegion(part)
+		if region then table.insert(glassRegions, region) end
+	end
+
+	return considered
 end
 
 function Builder.create()
@@ -805,94 +544,19 @@ function Builder.create()
 		end
 	end
 
-	local function isAboveDoor(part)
-		if #doorBoxes == 0 then return false end
-
-		local pLow, pHigh = Util.partBounds(part)
-		for _, doorBox in ipairs(doorBoxes) do
-			local ox = math.min(pHigh.X, doorBox.high.X) - math.max(pLow.X, doorBox.low.X)
-			local oz = math.min(pHigh.Z, doorBox.high.Z) - math.max(pLow.Z, doorBox.low.Z)
-			if ox > 0.1 and oz > 0.1 and pLow.Y >= doorBox.high.Y - 1.5 then
-				return true
-			end
-		end
-		return false
-	end
-
 	local stairParts = MapData.findStairs(geometry, frame, selLow, selHigh, blackEntries)
 
-	local count, considered = 0, 0
-	local minY = math.huge
+	local considered = 0
 	local copies = {}
 	local seen = {}
 	local glassRegions = {}
 
-	-- Original here is used for when glass parts are copied over to the minimap from PartCollection(s)
-	local function consider(part, isGlass, original)
-		local listPart = original or part
-		if seen[part] then return end
-		seen[part] = true
-
-		if not part:IsA("BasePart") or part:IsA("Terrain") or Util.isBall(part) then return end
-
-		local pLow, pHigh = Util.boundsInFrame(part, frame)
-		local inside = pLow.X <= selHigh.X and pHigh.X >= selLow.X
-			and pLow.Y <= selHigh.Y and pHigh.Y >= selLow.Y
-			and pLow.Z <= selHigh.Z and pHigh.Z >= selLow.Z
-		if not inside then return end
-		considered += 1
-
-		if #blackEntries > 0 and Util.matchesList(listPart, blackEntries) then return end
-
-		local isException = #excEntries > 0 and Util.matchesList(listPart, excEntries)
-
-		if floorHeight and not isException and pHigh.Y <= floorY + 0.25 then return end
-		if not isException and isAboveDoor(part) then return end
-
-		if not (isGlass or isException) then
-			if stairParts[part] then return end
-			if not Util.isVisible(part) then return end
-
-			local bsize = pHigh - pLow
-			local flatSlab = bsize.Y < bsize.X and bsize.Y < bsize.Z
-
-			local beside = not flatSlab and #glassRegions > 0 and Util.isBesideGlass(part, glassRegions)
-			if not beside then
-				local size = part.Size
-				local span = (math.min(pHigh.Y, selHigh.Y) - math.max(pLow.Y, floorY)) / spanRange * 100
-
-				if flatSlab
-					or not Util.passesFilter(part)
-					or not Util.isUpright(part)
-					or math.min(size.X, size.Y, size.Z) < State.minSize
-					or span < State.minSpanPercent then
-					return
-				end
-			end
-		end
-
-		local copy = part:Clone()
-		if not copy then return end
-
-		Stage.styleWall(copy)
-		copy.Color = Stage.styleColor(copy)
-		copy.CFrame = toStage * copy.CFrame
-		copy.Parent = newStage
-		table.insert(copies, copy)
-
-		local copyLow = Util.partBounds(copy)
-		minY = math.min(minY, copyLow.Y)
-		count += 1
-
-		if isGlass then
-			local region = Util.glassRegion(part)
-			if region then table.insert(glassRegions, region) end
-		end
-	end
-
 	if glassFolder then
 		for _, d in ipairs(glassFolder:GetDescendants()) do
-			consider(d, true)
+			considered = consider(
+				d, true, nil, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+				floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+			)
 		end
 	end
 
@@ -901,23 +565,38 @@ function Builder.create()
 			local moved = pl.part:Clone()
 			if moved then
 				moved.CFrame = pl.cf
-				consider(moved, true, pl.part)
+				considered = consider(
+					moved, true, pl.part, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+					floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+				)
 			end
 		else
-			consider(pl.part, true)
+			considered = consider(
+				pl.part, true, nil, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+				floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+			)
 		end
 	end
 
 	for _, d in ipairs(geometry:GetDescendants()) do
 		if not Util.hasCondition(d, geometry) then
-			consider(d, false)
+			considered = consider(
+				d, false, nil, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+				floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+			)
 		end
 	end
 
-	if count == 0 then
+	if #copies == 0 then
 		newStage:Destroy()
 		UI.setStatus("No parts passed the filters.", true)
 		return
+	end
+
+	local minY = math.huge
+	for _, copy in ipairs(copies) do
+		local copyLow = Util.partBounds(copy)
+		minY = math.min(minY, copyLow.Y)
 	end
 
 	local planeY = minY + 1
@@ -950,7 +629,7 @@ function Builder.create()
 	Stage.updateCamera()
 	Stage.rebuildPreview()
 
-	UI.setStatus(("Minimap created out of %d parts. %d parts filtered."):format(count, considered - count))
+	UI.setStatus(("Minimap created out of %d parts. %d parts filtered."):format(#copies, considered - #copies))
 end
 
 local PIXELS_PER_PAUSE = 1000000
@@ -1167,8 +846,7 @@ function Builder.save()
 		.. "(Try it again if it raises an error, it should work within like 3 attempts).")
 end
 
-return Builder
-]]></ProtectedString>
+return Builder]]></ProtectedString>
 				<string name="ScriptGuid">{F462350D-76F4-4973-B948-C6D970041783}</string>
 				<BinaryString name="AttributesSerialize"></BinaryString>
 				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
@@ -1179,7 +857,7 @@ return Builder
 				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX2C33F8931F314572A3796944EC8BE00A">
+		<Item class="ModuleScript" referent="RBX76E27F74CB984B9993181DD0A55B29A7">
 			<Properties>
 				<Content name="LinkedSource"><null></null></Content>
 				<ProtectedString name="Source"><![CDATA[-- MapData module
@@ -1593,7 +1271,7 @@ return MapData
 				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBXBD20B8B94FD04A00942138D1E7D7A81D">
+		<Item class="ModuleScript" referent="RBX56FB041EBF2044E7B56EFBE7A5B75E70">
 			<Properties>
 				<Content name="LinkedSource"><null></null></Content>
 				<ProtectedString name="Source"><![CDATA[-- PartLists module
@@ -1612,6 +1290,97 @@ local MAX_ADD_AT_ONCE = 300
 
 local PartLists = {}
 
+local function getListFolder(createIfMissing, cfg)
+	local folder = ReplicatedStorage:FindFirstChild(cfg.folderName)
+	if not folder and createIfMissing then
+		folder = Instance.new("Folder")
+		folder.Name = cfg.folderName
+		folder.Parent = ReplicatedStorage
+	end
+	return folder
+end
+
+local function allowed(part, roots)
+	if not roots then return true end
+	for _, folder in ipairs(roots) do
+		if part:IsDescendantOf(folder) then return true end
+	end
+	return false
+end
+
+local function addSelectedParts(cfg, list)
+	local candidates = {}
+	for _, inst in ipairs(Selection:Get()) do
+		if inst:IsA("BasePart") then
+			table.insert(candidates, inst)
+		elseif inst:IsA("Model") or inst:IsA("Folder") then
+			for _, d in ipairs(inst:GetDescendants()) do
+				if d:IsA("BasePart") then table.insert(candidates, d) end
+			end
+		end
+	end
+
+	if #candidates == 0 then
+		UI.setStatus("Select some parts first.", true)
+		return
+	end
+
+	local roots = nil
+	if cfg.allowedPaths then
+		roots = {}
+		for _, path in ipairs(cfg.allowedPaths) do
+			local folder = Util.getFolder(path)
+			if folder then table.insert(roots, folder) end
+		end
+	end
+
+	local store = getListFolder(true, cfg)
+	local existing = {}
+	for _, obj in ipairs(store:GetChildren()) do
+		if obj:IsA("ObjectValue") and obj.Value then
+			existing[obj.Value] = true
+		end
+	end
+
+	local added, rejected, outside, dupes = 0, 0, 0, 0
+	local capped = false
+
+	for _, part in ipairs(candidates) do
+		if part:IsA("Terrain") or (cfg.rejectBalls and Util.isBall(part)) then
+			rejected += 1
+		elseif not allowed(part, roots) then
+			outside += 1
+		elseif existing[part] then
+			dupes += 1
+		elseif added >= MAX_ADD_AT_ONCE then
+			capped = true
+			break
+		else
+			local obj = Instance.new("ObjectValue")
+			obj.Name = part.Name
+			obj.Value = part
+			obj:SetAttribute("Color", part.Color)
+			obj:SetAttribute("Material", part.Material.Name)
+			obj:SetAttribute("Size", part.Size)
+			obj:SetAttribute("ApplyToMatchingParts", false)
+			obj.Parent = store
+			existing[part] = true
+			added += 1
+		end
+	end
+
+	list.refreshUI()
+
+	local msg = ("Added %d part(s) to the %s."):format(added, cfg.noun)
+	if dupes > 0 then msg ..= (" %d already in the list."):format(dupes) end
+	if rejected > 0 then msg ..= cfg.rejectedNote:format(rejected) end
+	if outside > 0 and cfg.outsideNote then msg ..= cfg.outsideNote:format(outside) end
+	if capped then msg ..= (" Stopped at %d parts, use Match all for duplicates."):format(MAX_ADD_AT_ONCE) end
+	UI.setStatus(msg, added == 0)
+
+	if added > 0 and list.enabled then State.rebuildIfShowing() end
+end
+
 function PartLists.make(cfg)
 	local list = {}
 
@@ -1622,19 +1391,9 @@ function PartLists.make(cfg)
 		list.enabled = (saved == true)
 	end
 
-	local function getListFolder(createIfMissing)
-		local folder = ReplicatedStorage:FindFirstChild(cfg.folderName)
-		if not folder and createIfMissing then
-			folder = Instance.new("Folder")
-			folder.Name = cfg.folderName
-			folder.Parent = ReplicatedStorage
-		end
-		return folder
-	end
-
 	function list.read()
 		local entries = {}
-		local folder = getListFolder(false)
+		local folder = getListFolder(false, cfg)
 		if not folder then return entries end
 
 		for _, obj in ipairs(folder:GetChildren()) do
@@ -1763,101 +1522,19 @@ function PartLists.make(cfg)
 		end
 	end
 
-	local function addSelectedParts()
-		local candidates = {}
-		for _, inst in ipairs(Selection:Get()) do
-			if inst:IsA("BasePart") then
-				table.insert(candidates, inst)
-			elseif inst:IsA("Model") or inst:IsA("Folder") then
-				for _, d in ipairs(inst:GetDescendants()) do
-					if d:IsA("BasePart") then table.insert(candidates, d) end
-				end
-			end
-		end
-
-		if #candidates == 0 then
-			UI.setStatus("Select some parts first.", true)
-			return
-		end
-
-		local roots = nil
-		if cfg.allowedPaths then
-			roots = {}
-			for _, path in ipairs(cfg.allowedPaths) do
-				local folder = Util.getFolder(path)
-				if folder then table.insert(roots, folder) end
-			end
-		end
-
-		local function allowed(part)
-			if not roots then return true end
-			for _, folder in ipairs(roots) do
-				if part:IsDescendantOf(folder) then return true end
-			end
-			return false
-		end
-
-		local store = getListFolder(true)
-		local existing = {}
-		for _, obj in ipairs(store:GetChildren()) do
-			if obj:IsA("ObjectValue") and obj.Value then
-				existing[obj.Value] = true
-			end
-		end
-
-		local added, rejected, outside, dupes = 0, 0, 0, 0
-		local capped = false
-
-		for _, part in ipairs(candidates) do
-			if part:IsA("Terrain") or (cfg.rejectBalls and Util.isBall(part)) then
-				rejected += 1
-			elseif not allowed(part) then
-				outside += 1
-			elseif existing[part] then
-				dupes += 1
-			elseif added >= MAX_ADD_AT_ONCE then
-				capped = true
-				break
-			else
-				local obj = Instance.new("ObjectValue")
-				obj.Name = part.Name
-				obj.Value = part
-				obj:SetAttribute("Color", part.Color)
-				obj:SetAttribute("Material", part.Material.Name)
-				obj:SetAttribute("Size", part.Size)
-				obj:SetAttribute("ApplyToMatchingParts", false)
-				obj.Parent = store
-				existing[part] = true
-				added += 1
-			end
-		end
-
-		list.refreshUI()
-
-		local msg = ("Added %d part(s) to the %s."):format(added, cfg.noun)
-		if dupes > 0 then msg ..= (" %d already in the list."):format(dupes) end
-		if rejected > 0 then msg ..= cfg.rejectedNote:format(rejected) end
-		if outside > 0 and cfg.outsideNote then msg ..= cfg.outsideNote:format(outside) end
-		if capped then msg ..= (" Stopped at %d parts, use Match all for duplicates."):format(MAX_ADD_AT_ONCE) end
-		UI.setStatus(msg, added == 0)
-
-		if added > 0 and list.enabled then State.rebuildIfShowing() end
-	end
-
 	toggleBtn.Activated:Connect(function()
 		list.enabled = not list.enabled
 		State.plugin:SetSetting(cfg.setting, list.enabled)
 		list.refreshUI()
 		State.rebuildIfShowing()
 	end)
-	addBtn.Activated:Connect(addSelectedParts)
+	addBtn.Activated:Connect(function() addSelectedParts(cfg, list) end)
 
 	list.refreshUI()
 	return list
 end
 
-return PartLists
-]]></ProtectedString>
+return PartLists]]></ProtectedString>
 				<string name="ScriptGuid">{F9816569-0C51-460D-BCA7-FC48F661C982}</string>
 				<BinaryString name="AttributesSerialize"></BinaryString>
 				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
@@ -1868,7 +1545,7 @@ return PartLists
 				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX15BF7F89287B4CB88895F5EBE1855BD4">
+		<Item class="ModuleScript" referent="RBX4AEDDB5CB9104DCDABF2EE61ACB0B7C2">
 			<Properties>
 				<Content name="LinkedSource"><null></null></Content>
 				<ProtectedString name="Source"><![CDATA[-- Stage module
@@ -2140,7 +1817,7 @@ return Stage
 				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX1D90435CF12245A682E1E9D446E4B050">
+		<Item class="ModuleScript" referent="RBX9AE35FF6746C42AF87D023BBE601C4B5">
 			<Properties>
 				<Content name="LinkedSource"><null></null></Content>
 				<ProtectedString name="Source"><![CDATA[-- State module
@@ -2195,7 +1872,361 @@ return State]]></ProtectedString>
 				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX3840B75130AA4D16A0B42B8B25602462">
+		<Item class="ModuleScript" referent="RBXC9007361ABDD474B9C37D1D44D50D189">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- UI module
+-- This module handles the UI. Yup, that's it.
+-- This was a lot more work than I expected going in though not gonna lie.
+
+local State = require(script.Parent.State)
+
+local UI = {}
+
+local function getTheme(obj, objType)
+	local theme = settings().Studio.Theme
+	local themeColor = Enum.StudioStyleGuideColor
+	if objType == "bg" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.MainBackground)
+	elseif objType == "panel" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.InputFieldBackground)
+		obj.BorderColor3 = theme:GetColor(themeColor.InputFieldBorder)
+	elseif objType == "button" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.Button)
+		obj.TextColor3 = theme:GetColor(themeColor.ButtonText)
+		obj.BorderColor3 = theme:GetColor(themeColor.ButtonBorder)
+	elseif objType == "label" then
+		obj.TextColor3 = theme:GetColor(themeColor.MainText)
+	elseif objType == "sub" then
+		obj.TextColor3 = theme:GetColor(themeColor.SubText)
+	elseif objType == "input" then
+		obj.BackgroundColor3 = theme:GetColor(themeColor.InputFieldBackground)
+		obj.TextColor3 = theme:GetColor(themeColor.MainText)
+		obj.BorderColor3 = theme:GetColor(themeColor.InputFieldBorder)
+	end
+end
+
+local Elements = {}
+
+local function reg(inst, objType)
+	table.insert(Elements, { inst, objType })
+	getTheme(inst, objType)
+	return inst
+end
+
+function UI.applyTheme()
+	for _, element in ipairs(Elements) do
+		getTheme(element[1], element[2])
+	end
+end
+
+UI.Theme = getTheme
+UI.reg = reg
+UI.updatingUI = false
+
+function UI.makeButton(text, layoutOrder, parent, size)
+	local button = reg(Instance.new("TextButton"), "button")
+	button.Text = text
+	button.Font = Enum.Font.SourceSansBold
+	button.TextSize = 15
+	button.Size = size or UDim2.new(1, 0, 0, 30)
+	button.BorderSizePixel = 1
+	button.LayoutOrder = layoutOrder
+	button.Parent = parent or UI.content
+	return button
+end
+
+function UI.numberRow(labelText, layoutOrder, step, onStep, onTyped)
+	local row = Instance.new("Frame")
+	row.BackgroundTransparency = 1
+	row.Size = UDim2.new(1, 0, 0, 28)
+	row.LayoutOrder = layoutOrder
+	row.Parent = UI.content
+
+	local rowLayout = Instance.new("UIListLayout")
+	rowLayout.FillDirection = Enum.FillDirection.Horizontal
+	rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	rowLayout.Padding = UDim.new(0, 6)
+	rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	rowLayout.Parent = row
+
+	local nameLabel = reg(Instance.new("TextLabel"), "label")
+	nameLabel.Text = labelText
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Font = Enum.Font.SourceSans
+	nameLabel.TextSize = 14
+	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+	nameLabel.Size = UDim2.new(0, 70, 1, 0)
+	nameLabel.LayoutOrder = 1
+	nameLabel.Parent = row
+
+	local minusBtn = UI.makeButton("-", 2, row, UDim2.new(0, 28, 1, 0))
+
+	local valueBox = reg(Instance.new("TextBox"), "input")
+	valueBox.Font = Enum.Font.SourceSans
+	valueBox.TextSize = 14
+	valueBox.ClearTextOnFocus = false
+	valueBox.BorderSizePixel = 1
+	valueBox.Size = UDim2.new(1, -(70 + 28 + 28 + 18), 1, 0)
+	valueBox.LayoutOrder = 3
+	valueBox.Parent = row
+
+	local plusBtn = UI.makeButton("+", 4, row, UDim2.new(0, 28, 1, 0))
+
+	minusBtn.Activated:Connect(function() onStep(-step) end)
+	plusBtn.Activated:Connect(function() onStep(step) end)
+	valueBox:GetPropertyChangedSignal("Text"):Connect(function()
+		if UI.updatingUI then return end
+		local typedNumber = tonumber(valueBox.Text)
+		if typedNumber then onTyped(typedNumber) end
+	end)
+
+	return valueBox
+end
+
+function UI.setStatus(message, isError)
+	UI.statusLabel.Text = message
+	if isError then
+		UI.statusLabel.TextColor3 = Color3.fromRGB(230, 90, 90)
+	else
+		getTheme(UI.statusLabel, "sub")
+	end
+end
+
+function UI.refreshNumbers()
+	UI.updatingUI = true
+	UI.rotationBox.Text = string.format("%.1f", State.rotation)
+	UI.minSizeBox.Text = string.format("%g", State.minSize)
+	UI.minSpanBox.Text = string.format("%g", State.minSpanPercent)
+	UI.updatingUI = false
+end
+
+function UI.buildUI(plugin, widgetId)
+	table.clear(Elements)
+
+	local windowInfo = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, true, 360, 600, 360, 360)
+	local widget = plugin:CreateDockWidgetPluginGuiAsync(widgetId, windowInfo)
+	widget.Title = "Minimap Creator"
+	UI.widget = widget
+
+	local content = reg(Instance.new("ScrollingFrame"), "bg")
+	content.Size = UDim2.fromScale(1, 1)
+	content.BorderSizePixel = 0
+	content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	content.CanvasSize = UDim2.new()
+	content.ScrollBarThickness = 6
+	content.Parent = widget
+	UI.content = content
+	do
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
+		pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 8), UDim.new(0, 14)
+		pad.Parent = content
+		local list = Instance.new("UIListLayout")
+		list.Padding = UDim.new(0, 6)
+		list.SortOrder = Enum.SortOrder.LayoutOrder
+		list.Parent = content
+	end
+
+	local title = reg(Instance.new("TextLabel"), "label")
+	title.Text = "Minimap Creator"
+	title.Size = UDim2.new(1, 0, 0, 30)
+	title.BackgroundTransparency = 1
+	title.Font = Enum.Font.SourceSansBold
+	title.TextSize = 18
+	title.Parent = content
+
+	local selectBtn = reg(Instance.new("TextButton"), "button")
+	selectBtn.Text = "Select"
+	selectBtn.Font = Enum.Font.SourceSansBold
+	selectBtn.TextSize = 15
+	selectBtn.Size = UDim2.new(1, 0, 0, 30)
+	selectBtn.BorderSizePixel = 1
+	selectBtn.LayoutOrder = 2
+	selectBtn.Parent = content
+	UI.selectBtn = selectBtn
+
+	local dropdown = reg(Instance.new("ScrollingFrame"), "panel")
+	dropdown.Size = UDim2.new(1, 0, 0, 100)
+	dropdown.BorderSizePixel = 1
+	dropdown.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	dropdown.CanvasSize = UDim2.new()
+	dropdown.ScrollBarThickness = 6
+	dropdown.Visible = false
+	dropdown.LayoutOrder = 3
+	dropdown.Parent = content
+	UI.dropdown = dropdown
+
+	local dropdownPad = Instance.new("UIPadding")
+	dropdownPad.PaddingTop, dropdownPad.PaddingBottom = UDim.new(0, 3), UDim.new(0, 3)
+	dropdownPad.PaddingLeft, dropdownPad.PaddingRight = UDim.new(0, 3), UDim.new(0, 3)
+	dropdownPad.Parent = dropdown
+
+	local dropdownList = Instance.new("UIListLayout")
+	dropdownList.Padding = UDim.new(0, 2)
+	dropdownList.SortOrder = Enum.SortOrder.LayoutOrder
+	dropdownList.Parent = dropdown
+
+	local infoLabel = reg(Instance.new("TextLabel"), "sub")
+	infoLabel.Text = "No floor selected."
+	infoLabel.BackgroundTransparency = 1
+	infoLabel.Font = Enum.Font.SourceSans
+	infoLabel.TextSize = 13
+	infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+	infoLabel.TextYAlignment = Enum.TextYAlignment.Top
+	infoLabel.TextWrapped = true
+	infoLabel.AutomaticSize = Enum.AutomaticSize.Y
+	infoLabel.Size = UDim2.new(1, 0, 0, 0)
+	infoLabel.LayoutOrder = 4
+	infoLabel.Parent = content
+	UI.infoLabel = infoLabel
+
+	local createBtn = reg(Instance.new("TextButton"), "button")
+	createBtn.Text = "Create"
+	createBtn.Font = Enum.Font.SourceSansBold
+	createBtn.TextSize = 15
+	createBtn.Size = UDim2.new(1, 0, 0, 30)
+	createBtn.BorderSizePixel = 1
+	createBtn.LayoutOrder = 5
+	createBtn.Parent = content
+	UI.createBtn = createBtn
+
+	local saveBtn = reg(Instance.new("TextButton"), "button")
+	saveBtn.Text = "Save"
+	saveBtn.Font = Enum.Font.SourceSansBold
+	saveBtn.TextSize = 15
+	saveBtn.Size = UDim2.new(1, 0, 0, 30)
+	saveBtn.BorderSizePixel = 1
+	saveBtn.LayoutOrder = 6
+	saveBtn.Parent = content
+	UI.saveBtn = saveBtn
+
+	local styleRow = Instance.new("Frame")
+	styleRow.BackgroundTransparency = 1
+	styleRow.Size = UDim2.new(1, 0, 0, 28)
+	styleRow.LayoutOrder = 7
+	styleRow.Parent = content
+
+	local styleLayout = Instance.new("UIListLayout")
+	styleLayout.FillDirection = Enum.FillDirection.Horizontal
+	styleLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	styleLayout.Padding = UDim.new(0, 6)
+	styleLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	styleLayout.Parent = styleRow
+
+	local defaultBtn = reg(Instance.new("TextButton"), "button")
+	defaultBtn.Text = "Default"
+	defaultBtn.Font = Enum.Font.SourceSansBold
+	defaultBtn.TextSize = 15
+	defaultBtn.Size = UDim2.new(0.5, -3, 1, 0)
+	defaultBtn.BorderSizePixel = 1
+	defaultBtn.LayoutOrder = 1
+	defaultBtn.Parent = styleRow
+	UI.defaultBtn = defaultBtn
+
+	local outlineBtn = reg(Instance.new("TextButton"), "button")
+	outlineBtn.Text = "Outline"
+	outlineBtn.Font = Enum.Font.SourceSansBold
+	outlineBtn.TextSize = 15
+	outlineBtn.Size = UDim2.new(0.5, -3, 1, 0)
+	outlineBtn.BorderSizePixel = 1
+	outlineBtn.LayoutOrder = 2
+	outlineBtn.Parent = styleRow
+	UI.outlineBtn = outlineBtn
+
+	local filterRow = Instance.new("Frame")
+	filterRow.BackgroundTransparency = 1
+	filterRow.Size = UDim2.new(1, 0, 0, 28)
+	filterRow.LayoutOrder = 8
+	filterRow.Parent = content
+
+	local filterLayout = Instance.new("UIListLayout")
+	filterLayout.FillDirection = Enum.FillDirection.Horizontal
+	filterLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	filterLayout.Padding = UDim.new(0, 6)
+	filterLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	filterLayout.Parent = filterRow
+
+	local partsBtn = reg(Instance.new("TextButton"), "button")
+	partsBtn.Text = "Parts Only"
+	partsBtn.Font = Enum.Font.SourceSansBold
+	partsBtn.TextScaled = true
+	partsBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
+	partsBtn.BorderSizePixel = 1
+	partsBtn.LayoutOrder = 1
+	partsBtn.Parent = filterRow
+	local partsLimit = Instance.new("UITextSizeConstraint")
+	partsLimit.MaxTextSize, partsLimit.MinTextSize = 14, 8
+	partsLimit.Parent = partsBtn
+	UI.partsBtn = partsBtn
+
+	local meshesBtn = reg(Instance.new("TextButton"), "button")
+	meshesBtn.Text = "Parts + Meshes"
+	meshesBtn.Font = Enum.Font.SourceSansBold
+	meshesBtn.TextScaled = true
+	meshesBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
+	meshesBtn.BorderSizePixel = 1
+	meshesBtn.LayoutOrder = 2
+	meshesBtn.Parent = filterRow
+	local meshesLimit = Instance.new("UITextSizeConstraint")
+	meshesLimit.MaxTextSize, meshesLimit.MinTextSize = 14, 8
+	meshesLimit.Parent = meshesBtn
+	UI.meshesBtn = meshesBtn
+
+	local allBtn = reg(Instance.new("TextButton"), "button")
+	allBtn.Text = "All"
+	allBtn.Font = Enum.Font.SourceSansBold
+	allBtn.TextScaled = true
+	allBtn.Size = UDim2.new(1 / 3, -4, 1, 0)
+	allBtn.BorderSizePixel = 1
+	allBtn.LayoutOrder = 3
+	allBtn.Parent = filterRow
+	local allLimit = Instance.new("UITextSizeConstraint")
+	allLimit.MaxTextSize, allLimit.MinTextSize = 14, 8
+	allLimit.Parent = allBtn
+	UI.allBtn = allBtn
+
+	local thickenBtn = reg(Instance.new("TextButton"), "button")
+	thickenBtn.Text = "Thicken thin walls to the average"
+	thickenBtn.Font = Enum.Font.SourceSansBold
+	thickenBtn.TextSize = 15
+	thickenBtn.Size = UDim2.new(1, 0, 0, 30)
+	thickenBtn.BorderSizePixel = 1
+	thickenBtn.LayoutOrder = 9
+	thickenBtn.Parent = content
+	UI.thickenBtn = thickenBtn
+
+	local statusLabel = reg(Instance.new("TextLabel"), "sub")
+	statusLabel.Text = "Use Select to pick a floor."
+	statusLabel.BackgroundTransparency = 1
+	statusLabel.Font = Enum.Font.SourceSans
+	statusLabel.TextSize = 13
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+	statusLabel.TextWrapped = true
+	statusLabel.AutomaticSize = Enum.AutomaticSize.Y
+	statusLabel.Size = UDim2.new(1, 0, 0, 0)
+	statusLabel.LayoutOrder = 19
+	statusLabel.Parent = content
+	UI.statusLabel = statusLabel
+
+	if UI.themeConnection then UI.themeConnection:Disconnect() end
+	UI.themeConnection = settings().Studio.ThemeChanged:Connect(UI.applyTheme)
+end
+
+return UI
+]]></ProtectedString>
+				<string name="ScriptGuid">{97E46D10-9347-45ED-9643-C97A3947DB42}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">UI</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX8D00C8A786C040C5A2C80DE2A47703A7">
 			<Properties>
 				<Content name="LinkedSource"><null></null></Content>
 				<ProtectedString name="Source"><![CDATA[-- Util(ity) module
