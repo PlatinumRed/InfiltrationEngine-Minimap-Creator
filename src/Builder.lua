@@ -56,6 +56,84 @@ local function createCameraPart(stage)
 	return cp
 end
 
+local function isAboveDoor(part, doorBoxes)
+	if #doorBoxes == 0 then return false end
+
+	local pLow, pHigh = Util.partBounds(part)
+	for _, doorBox in ipairs(doorBoxes) do
+		local ox = math.min(pHigh.X, doorBox.high.X) - math.max(pLow.X, doorBox.low.X)
+		local oz = math.min(pHigh.Z, doorBox.high.Z) - math.max(pLow.Z, doorBox.low.Z)
+		if ox > 0.1 and oz > 0.1 and pLow.Y >= doorBox.high.Y - 1.5 then
+			return true
+		end
+	end
+	return false
+end
+
+-- Original here is used for when glass parts are copied over to the minimap from PartCollection(s)
+local function consider(
+	part, isGlass, original, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+	floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+)
+	local listPart = original or part
+	if seen[part] then return considered end
+	seen[part] = true
+
+	if not part:IsA("BasePart") or part:IsA("Terrain") or Util.isBall(part) then return considered end
+
+	local pLow, pHigh = Util.boundsInFrame(part, frame)
+	local inside = pLow.X <= selHigh.X and pHigh.X >= selLow.X
+		and pLow.Y <= selHigh.Y and pHigh.Y >= selLow.Y
+		and pLow.Z <= selHigh.Z and pHigh.Z >= selLow.Z
+	if not inside then return considered end
+	considered += 1
+
+	if #blackEntries > 0 and Util.matchesList(listPart, blackEntries) then return considered end
+
+	local isException = #excEntries > 0 and Util.matchesList(listPart, excEntries)
+
+	if floorHeight and not isException and pHigh.Y <= floorY + 0.25 then return considered end
+	if not isException and isAboveDoor(part, doorBoxes) then return considered end
+
+	if not (isGlass or isException) then
+		if stairParts[part] then return considered end
+		if not Util.isVisible(part) then return considered end
+
+		local bsize = pHigh - pLow
+		local flatSlab = bsize.Y < bsize.X and bsize.Y < bsize.Z
+
+		local beside = not flatSlab and #glassRegions > 0 and Util.isBesideGlass(part, glassRegions)
+		if not beside then
+			local size = part.Size
+			local span = (math.min(pHigh.Y, selHigh.Y) - math.max(pLow.Y, floorY)) / spanRange * 100
+
+			if flatSlab
+				or not Util.passesFilter(part)
+				or not Util.isUpright(part)
+				or math.min(size.X, size.Y, size.Z) < State.minSize
+				or span < State.minSpanPercent then
+				return considered
+			end
+		end
+	end
+
+	local copy = part:Clone()
+	if not copy then return considered end
+
+	Stage.styleWall(copy)
+	copy.Color = Stage.styleColor(copy)
+	copy.CFrame = toStage * copy.CFrame
+	copy.Parent = newStage
+	table.insert(copies, copy)
+
+	if isGlass then
+		local region = Util.glassRegion(part)
+		if region then table.insert(glassRegions, region) end
+	end
+
+	return considered
+end
+
 function Builder.create()
 	if State.busy then return end
 
@@ -122,94 +200,19 @@ function Builder.create()
 		end
 	end
 
-	local function isAboveDoor(part)
-		if #doorBoxes == 0 then return false end
-
-		local pLow, pHigh = Util.partBounds(part)
-		for _, doorBox in ipairs(doorBoxes) do
-			local ox = math.min(pHigh.X, doorBox.high.X) - math.max(pLow.X, doorBox.low.X)
-			local oz = math.min(pHigh.Z, doorBox.high.Z) - math.max(pLow.Z, doorBox.low.Z)
-			if ox > 0.1 and oz > 0.1 and pLow.Y >= doorBox.high.Y - 1.5 then
-				return true
-			end
-		end
-		return false
-	end
-
 	local stairParts = MapData.findStairs(geometry, frame, selLow, selHigh, blackEntries)
 
-	local count, considered = 0, 0
-	local minY = math.huge
+	local considered = 0
 	local copies = {}
 	local seen = {}
 	local glassRegions = {}
 
-	-- Original here is used for when glass parts are copied over to the minimap from PartCollection(s)
-	local function consider(part, isGlass, original)
-		local listPart = original or part
-		if seen[part] then return end
-		seen[part] = true
-
-		if not part:IsA("BasePart") or part:IsA("Terrain") or Util.isBall(part) then return end
-
-		local pLow, pHigh = Util.boundsInFrame(part, frame)
-		local inside = pLow.X <= selHigh.X and pHigh.X >= selLow.X
-			and pLow.Y <= selHigh.Y and pHigh.Y >= selLow.Y
-			and pLow.Z <= selHigh.Z and pHigh.Z >= selLow.Z
-		if not inside then return end
-		considered += 1
-
-		if #blackEntries > 0 and Util.matchesList(listPart, blackEntries) then return end
-
-		local isException = #excEntries > 0 and Util.matchesList(listPart, excEntries)
-
-		if floorHeight and not isException and pHigh.Y <= floorY + 0.25 then return end
-		if not isException and isAboveDoor(part) then return end
-
-		if not (isGlass or isException) then
-			if stairParts[part] then return end
-			if not Util.isVisible(part) then return end
-
-			local bsize = pHigh - pLow
-			local flatSlab = bsize.Y < bsize.X and bsize.Y < bsize.Z
-
-			local beside = not flatSlab and #glassRegions > 0 and Util.isBesideGlass(part, glassRegions)
-			if not beside then
-				local size = part.Size
-				local span = (math.min(pHigh.Y, selHigh.Y) - math.max(pLow.Y, floorY)) / spanRange * 100
-
-				if flatSlab
-					or not Util.passesFilter(part)
-					or not Util.isUpright(part)
-					or math.min(size.X, size.Y, size.Z) < State.minSize
-					or span < State.minSpanPercent then
-					return
-				end
-			end
-		end
-
-		local copy = part:Clone()
-		if not copy then return end
-
-		Stage.styleWall(copy)
-		copy.Color = Stage.styleColor(copy)
-		copy.CFrame = toStage * copy.CFrame
-		copy.Parent = newStage
-		table.insert(copies, copy)
-
-		local copyLow = Util.partBounds(copy)
-		minY = math.min(minY, copyLow.Y)
-		count += 1
-
-		if isGlass then
-			local region = Util.glassRegion(part)
-			if region then table.insert(glassRegions, region) end
-		end
-	end
-
 	if glassFolder then
 		for _, d in ipairs(glassFolder:GetDescendants()) do
-			consider(d, true)
+			considered = consider(
+				d, true, nil, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+				floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+			)
 		end
 	end
 
@@ -218,23 +221,38 @@ function Builder.create()
 			local moved = pl.part:Clone()
 			if moved then
 				moved.CFrame = pl.cf
-				consider(moved, true, pl.part)
+				considered = consider(
+					moved, true, pl.part, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+					floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+				)
 			end
 		else
-			consider(pl.part, true)
+			considered = consider(
+				pl.part, true, nil, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+				floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+			)
 		end
 	end
 
 	for _, d in ipairs(geometry:GetDescendants()) do
 		if not Util.hasCondition(d, geometry) then
-			consider(d, false)
+			considered = consider(
+				d, false, nil, seen, frame, selLow, selHigh, considered, blackEntries, excEntries,
+				floorHeight, floorY, doorBoxes, stairParts, glassRegions, spanRange, toStage, newStage, copies
+			)
 		end
 	end
 
-	if count == 0 then
+	if #copies == 0 then
 		newStage:Destroy()
 		UI.setStatus("No parts passed the filters.", true)
 		return
+	end
+
+	local minY = math.huge
+	for _, copy in ipairs(copies) do
+		local copyLow = Util.partBounds(copy)
+		minY = math.min(minY, copyLow.Y)
 	end
 
 	local planeY = minY + 1
@@ -267,7 +285,7 @@ function Builder.create()
 	Stage.updateCamera()
 	Stage.rebuildPreview()
 
-	UI.setStatus(("Minimap created out of %d parts. %d parts filtered."):format(count, considered - count))
+	UI.setStatus(("Minimap created out of %d parts. %d parts filtered."):format(#copies, considered - #copies))
 end
 
 local PIXELS_PER_PAUSE = 1000000

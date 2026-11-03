@@ -14,6 +14,97 @@ local MAX_ADD_AT_ONCE = 300
 
 local PartLists = {}
 
+local function getListFolder(createIfMissing, cfg)
+	local folder = ReplicatedStorage:FindFirstChild(cfg.folderName)
+	if not folder and createIfMissing then
+		folder = Instance.new("Folder")
+		folder.Name = cfg.folderName
+		folder.Parent = ReplicatedStorage
+	end
+	return folder
+end
+
+local function allowed(part, roots)
+	if not roots then return true end
+	for _, folder in ipairs(roots) do
+		if part:IsDescendantOf(folder) then return true end
+	end
+	return false
+end
+
+local function addSelectedParts(cfg, list)
+	local candidates = {}
+	for _, inst in ipairs(Selection:Get()) do
+		if inst:IsA("BasePart") then
+			table.insert(candidates, inst)
+		elseif inst:IsA("Model") or inst:IsA("Folder") then
+			for _, d in ipairs(inst:GetDescendants()) do
+				if d:IsA("BasePart") then table.insert(candidates, d) end
+			end
+		end
+	end
+
+	if #candidates == 0 then
+		UI.setStatus("Select some parts first.", true)
+		return
+	end
+
+	local roots = nil
+	if cfg.allowedPaths then
+		roots = {}
+		for _, path in ipairs(cfg.allowedPaths) do
+			local folder = Util.getFolder(path)
+			if folder then table.insert(roots, folder) end
+		end
+	end
+
+	local store = getListFolder(true, cfg)
+	local existing = {}
+	for _, obj in ipairs(store:GetChildren()) do
+		if obj:IsA("ObjectValue") and obj.Value then
+			existing[obj.Value] = true
+		end
+	end
+
+	local added, rejected, outside, dupes = 0, 0, 0, 0
+	local capped = false
+
+	for _, part in ipairs(candidates) do
+		if part:IsA("Terrain") or (cfg.rejectBalls and Util.isBall(part)) then
+			rejected += 1
+		elseif not allowed(part, roots) then
+			outside += 1
+		elseif existing[part] then
+			dupes += 1
+		elseif added >= MAX_ADD_AT_ONCE then
+			capped = true
+			break
+		else
+			local obj = Instance.new("ObjectValue")
+			obj.Name = part.Name
+			obj.Value = part
+			obj:SetAttribute("Color", part.Color)
+			obj:SetAttribute("Material", part.Material.Name)
+			obj:SetAttribute("Size", part.Size)
+			obj:SetAttribute("ApplyToMatchingParts", false)
+			obj.Parent = store
+			existing[part] = true
+			added += 1
+		end
+	end
+
+	list.refreshUI()
+
+	local msg = ("Added %d part(s) to the %s."):format(added, cfg.noun)
+	if dupes > 0 then msg ..= (" %d already in the list."):format(dupes) end
+	if rejected > 0 then msg ..= cfg.rejectedNote:format(rejected) end
+	if outside > 0 and cfg.outsideNote then msg ..= cfg.outsideNote:format(outside) end
+	if capped then msg ..= (" Stopped at %d parts, use Match all for duplicates."):format(MAX_ADD_AT_ONCE) end
+	UI.setStatus(msg, added == 0)
+
+	if added > 0 and list.enabled then State.rebuildIfShowing() end
+end
+
 function PartLists.make(cfg)
 	local list = {}
 
@@ -24,19 +115,9 @@ function PartLists.make(cfg)
 		list.enabled = (saved == true)
 	end
 
-	local function getListFolder(createIfMissing)
-		local folder = ReplicatedStorage:FindFirstChild(cfg.folderName)
-		if not folder and createIfMissing then
-			folder = Instance.new("Folder")
-			folder.Name = cfg.folderName
-			folder.Parent = ReplicatedStorage
-		end
-		return folder
-	end
-
 	function list.read()
 		local entries = {}
-		local folder = getListFolder(false)
+		local folder = getListFolder(false, cfg)
 		if not folder then return entries end
 
 		for _, obj in ipairs(folder:GetChildren()) do
@@ -165,94 +246,13 @@ function PartLists.make(cfg)
 		end
 	end
 
-	local function addSelectedParts()
-		local candidates = {}
-		for _, inst in ipairs(Selection:Get()) do
-			if inst:IsA("BasePart") then
-				table.insert(candidates, inst)
-			elseif inst:IsA("Model") or inst:IsA("Folder") then
-				for _, d in ipairs(inst:GetDescendants()) do
-					if d:IsA("BasePart") then table.insert(candidates, d) end
-				end
-			end
-		end
-
-		if #candidates == 0 then
-			UI.setStatus("Select some parts first.", true)
-			return
-		end
-
-		local roots = nil
-		if cfg.allowedPaths then
-			roots = {}
-			for _, path in ipairs(cfg.allowedPaths) do
-				local folder = Util.getFolder(path)
-				if folder then table.insert(roots, folder) end
-			end
-		end
-
-		local function allowed(part)
-			if not roots then return true end
-			for _, folder in ipairs(roots) do
-				if part:IsDescendantOf(folder) then return true end
-			end
-			return false
-		end
-
-		local store = getListFolder(true)
-		local existing = {}
-		for _, obj in ipairs(store:GetChildren()) do
-			if obj:IsA("ObjectValue") and obj.Value then
-				existing[obj.Value] = true
-			end
-		end
-
-		local added, rejected, outside, dupes = 0, 0, 0, 0
-		local capped = false
-
-		for _, part in ipairs(candidates) do
-			if part:IsA("Terrain") or (cfg.rejectBalls and Util.isBall(part)) then
-				rejected += 1
-			elseif not allowed(part) then
-				outside += 1
-			elseif existing[part] then
-				dupes += 1
-			elseif added >= MAX_ADD_AT_ONCE then
-				capped = true
-				break
-			else
-				local obj = Instance.new("ObjectValue")
-				obj.Name = part.Name
-				obj.Value = part
-				obj:SetAttribute("Color", part.Color)
-				obj:SetAttribute("Material", part.Material.Name)
-				obj:SetAttribute("Size", part.Size)
-				obj:SetAttribute("ApplyToMatchingParts", false)
-				obj.Parent = store
-				existing[part] = true
-				added += 1
-			end
-		end
-
-		list.refreshUI()
-
-		local msg = ("Added %d part(s) to the %s."):format(added, cfg.noun)
-		if dupes > 0 then msg ..= (" %d already in the list."):format(dupes) end
-		if rejected > 0 then msg ..= cfg.rejectedNote:format(rejected) end
-		if outside > 0 and cfg.outsideNote then msg ..= cfg.outsideNote:format(outside) end
-		if capped then msg ..= (" Stopped at %d parts, use Match all for duplicates."):format(MAX_ADD_AT_ONCE) end
-		UI.setStatus(msg, added == 0)
-
-		if added > 0 and list.enabled then State.rebuildIfShowing() end
-	end
-
 	toggleBtn.Activated:Connect(function()
 		list.enabled = not list.enabled
 		State.plugin:SetSetting(cfg.setting, list.enabled)
 		list.refreshUI()
 		State.rebuildIfShowing()
 	end)
-	addBtn.Activated:Connect(addSelectedParts)
+	addBtn.Activated:Connect(function() addSelectedParts(cfg, list) end)
 
 	list.refreshUI()
 	return list

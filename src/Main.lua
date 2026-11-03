@@ -1,16 +1,16 @@
 --[[
-	Minimap Creator v1.1
+	Minimap Creator v1.11
 	by: Red_Platinum
 ]]
 
 local Selection = game:GetService("Selection")
 
-local State = require(script.State)
-local UI = require(script.UI)
-local Stage = require(script.Stage)
-local PartLists = require(script.PartLists)
-local MapData = require(script.MapData)
-local Builder = require(script.Builder)
+local State = require(script.Parent.State)
+local UI = require(script.Parent.UI)
+local Stage = require(script.Parent.Stage)
+local PartLists = require(script.Parent.PartLists)
+local MapData = require(script.Parent.MapData)
+local Builder = require(script.Parent.Builder)
 
 State.plugin = plugin
 
@@ -45,6 +45,94 @@ local windowCount = 0
 local isOpening = false
 local isClosing = false
 local closeWindow
+
+local function refreshSelectButton()
+	if State.selectedFloorKey then
+		UI.selectBtn.Text = "Select  (Floor " .. State.selectedFloorKey .. ")"
+	else
+		UI.selectBtn.Text = "Select"
+	end
+end
+
+local function describeFloor(floorKey)
+	local floor, err = MapData.resolveFloor(floorKey)
+	if not floor then
+		UI.infoLabel.Text = tostring(err)
+		return nil
+	end
+	if floor.above then
+		UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up to '%s' (Y %.1f)."):format(
+			floorKey, floor.part.Name, floor.lowY, floor.above.Name, floor.highY)
+	else
+		UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up %d studs (no part above it)."):format(
+			floorKey, floor.part.Name, floor.lowY, floor.highY - floor.lowY)
+	end
+	return floor
+end
+
+local function chooseFloor(floorKey)
+	State.selectedFloorKey = floorKey
+	UI.dropdown.Visible = false
+	refreshSelectButton()
+
+	local floor = describeFloor(floorKey)
+	if not floor then return end
+	Selection:Set(floor.above and { floor.part, floor.above } or { floor.part })
+
+	if State.stage and not State.busy then
+		Builder.create()
+	else
+		UI.setStatus("Floor " .. floorKey .. " selected. Press Create.")
+	end
+end
+
+local function populateDropdown(floors)
+	for _, child in ipairs(UI.dropdown:GetChildren()) do
+		if child:IsA("TextButton") then child:Destroy() end
+	end
+	for index, floorEntry in ipairs(floors) do
+		local floorButton = Instance.new("TextButton")
+		floorButton.Text = "Floor " .. floorEntry.key
+		floorButton.Font = Enum.Font.SourceSans
+		floorButton.TextSize = 14
+		floorButton.Size = UDim2.new(1, -6, 0, 24)
+		floorButton.LayoutOrder = index
+		floorButton.BorderSizePixel = 0
+		UI.Theme(floorButton, "button")
+		floorButton.Parent = UI.dropdown
+		floorButton.Activated:Connect(function() chooseFloor(floorEntry.key) end)
+	end
+	UI.dropdown.Size = UDim2.new(1, 0, 0, math.min(#floors * 26 + 8, 170))
+end
+
+local function refreshStyleButtons()
+	UI.defaultBtn.Text = (State.mapStyle == "Default") and "> Default <" or "Default"
+	UI.outlineBtn.Text = (State.mapStyle == "Outline") and "> Outline <" or "Outline"
+end
+
+local function setMapStyle(name)
+	State.mapStyle = name
+	plugin:SetSetting("MapStyle", name)
+	refreshStyleButtons()
+	Stage.applyStyle()
+end
+
+local function refreshFilterButtons()
+	UI.partsBtn.Text = (State.partFilter == "PartsOnly") and "● Parts Only" or "Parts Only"
+	UI.meshesBtn.Text = (State.partFilter == "PartsAndMeshes") and "● Parts + Meshes" or "Parts + Meshes"
+	UI.allBtn.Text = (State.partFilter == "All") and "● All" or "All"
+end
+
+local function setPartFilter(name)
+	State.partFilter = name
+	plugin:SetSetting("PartFilter", name)
+	refreshFilterButtons()
+	State.rebuildIfShowing()
+end
+
+local function refreshThickenButton()
+	UI.thickenBtn.Text = "Thicken thin walls to the average: " .. (State.thickenWalls and "ON" or "OFF")
+end
 
 local function buildWindow()
 	windowCount += 1
@@ -108,65 +196,6 @@ local function buildWindow()
 
 	UI.refreshNumbers()
 
-	local function refreshSelectButton()
-		if State.selectedFloorKey then
-			UI.selectBtn.Text = "Select  (Floor " .. State.selectedFloorKey .. ")"
-		else
-			UI.selectBtn.Text = "Select"
-		end
-	end
-
-	local function describeFloor(floorKey)
-		local floor, err = MapData.resolveFloor(floorKey)
-		if not floor then
-			UI.infoLabel.Text = tostring(err)
-			return nil
-		end
-		if floor.above then
-			UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up to '%s' (Y %.1f)."):format(
-				floorKey, floor.part.Name, floor.lowY, floor.above.Name, floor.highY)
-		else
-			UI.infoLabel.Text = ("Floor %s: from '%s' (Y %.1f) up %d studs (no part above it)."):format(
-				floorKey, floor.part.Name, floor.lowY, floor.highY - floor.lowY)
-		end
-		return floor
-	end
-
-	local function chooseFloor(floorKey)
-		State.selectedFloorKey = floorKey
-		UI.dropdown.Visible = false
-		refreshSelectButton()
-
-		local floor = describeFloor(floorKey)
-		if not floor then return end
-		Selection:Set(floor.above and { floor.part, floor.above } or { floor.part })
-
-		if State.stage and not State.busy then
-			Builder.create()
-		else
-			UI.setStatus("Floor " .. floorKey .. " selected. Press Create.")
-		end
-	end
-
-	local function populateDropdown(floors)
-		for _, child in ipairs(UI.dropdown:GetChildren()) do
-			if child:IsA("TextButton") then child:Destroy() end
-		end
-		for index, floorEntry in ipairs(floors) do
-			local floorButton = Instance.new("TextButton")
-			floorButton.Text = "Floor " .. floorEntry.key
-			floorButton.Font = Enum.Font.SourceSans
-			floorButton.TextSize = 14
-			floorButton.Size = UDim2.new(1, -6, 0, 24)
-			floorButton.LayoutOrder = index
-			floorButton.BorderSizePixel = 0
-			UI.Theme(floorButton, "button")
-			floorButton.Parent = UI.dropdown
-			floorButton.Activated:Connect(function() chooseFloor(floorEntry.key) end)
-		end
-		UI.dropdown.Size = UDim2.new(1, 0, 0, math.min(#floors * 26 + 8, 170))
-	end
-
 	UI.selectBtn.Activated:Connect(function()
 		if UI.dropdown.Visible then
 			UI.dropdown.Visible = false
@@ -186,41 +215,12 @@ local function buildWindow()
 		UI.setStatus("Choose a floor from the list.")
 	end)
 
-	local function refreshStyleButtons()
-		UI.defaultBtn.Text = (State.mapStyle == "Default") and "> Default <" or "Default"
-		UI.outlineBtn.Text = (State.mapStyle == "Outline") and "> Outline <" or "Outline"
-	end
-
-	local function setMapStyle(name)
-		State.mapStyle = name
-		plugin:SetSetting("MapStyle", name)
-		refreshStyleButtons()
-		Stage.applyStyle()
-	end
-
 	UI.defaultBtn.Activated:Connect(function() setMapStyle("Default") end)
 	UI.outlineBtn.Activated:Connect(function() setMapStyle("Outline") end)
-
-	local function refreshFilterButtons()
-		UI.partsBtn.Text = (State.partFilter == "PartsOnly") and "● Parts Only" or "Parts Only"
-		UI.meshesBtn.Text = (State.partFilter == "PartsAndMeshes") and "● Parts + Meshes" or "Parts + Meshes"
-		UI.allBtn.Text = (State.partFilter == "All") and "● All" or "All"
-	end
-
-	local function setPartFilter(name)
-		State.partFilter = name
-		plugin:SetSetting("PartFilter", name)
-		refreshFilterButtons()
-		State.rebuildIfShowing()
-	end
 
 	UI.partsBtn.Activated:Connect(function() setPartFilter("PartsOnly") end)
 	UI.meshesBtn.Activated:Connect(function() setPartFilter("PartsAndMeshes") end)
 	UI.allBtn.Activated:Connect(function() setPartFilter("All") end)
-
-	local function refreshThickenButton()
-		UI.thickenBtn.Text = "Thicken thin walls to the average: " .. (State.thickenWalls and "ON" or "OFF")
-	end
 
 	UI.thickenBtn.Activated:Connect(function()
 		State.thickenWalls = not State.thickenWalls
